@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bpa-pec-importador"
+version = "2.0.0"
+requires-python = ">=3.12,<3.13"
+description = "Importador local CEAE para consulta somente leitura ao PEC e inclusão protegida no BPA"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["firebird: teste controlado contra o Firebird ativo, sempre com ROLLBACK"]

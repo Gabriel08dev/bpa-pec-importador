@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import asdict
+from pathlib import Path
+
+from app.firebird.backup import create_backup
+from app.firebird.legacy_runner import LegacyRunner
+from app.firebird.schema_inspector import inspect
+from app.firebird.sql_builder import build_insert_script
+from app.firebird.verifier import verify_output
+from app.models import ReviewItem, Status
+from app.repositories.audit_repository import AuditRepository
+from app.repositories.firebird_repository import FirebirdRepository
+from app.repositories.review_repository import ReviewRepository
+from app.services.batch_service import BatchService
+from app.services.patient_service import valid_cns, valid_cpf
+from app.services.sheet_allocator import allocate
+
+
+def ensure_bpa_closed() -> None:
+    completed = subprocess.run(["tasklist.exe", "/FI", "IMAGENAME eq bpamag.exe", "/FO", "CSV", "/NH"], capture_output=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if "bpamag.exe" in completed.stdout.decode("cp1252", errors="replace").lower():
+        raise RuntimeError("Feche o BPA Magnético antes de preparar ou gravar o lote")
+
+
+def _items(payload: dict) -> list[ReviewItem]:
+    return [ReviewItem.from_dict(item) for item in payload.get("items", [])]
+
+
+class FirebirdWorkflow:
+    def __init__(self, reviews: ReviewRepository, audit: AuditRepository, runner: LegacyRunner, repository: FirebirdRepository,
+                 helper_backup: Path, backups: Path, credential_target: str, database: str):
+        self.reviews = reviews; self.audit = audit; self.runner = runner; self.repository = repository
+        self.helper_backup = helper_backup; self.backups = backups; self.credential_target = credential_target; self.database = database
+
+    def preview(self, batch_id: str) -> dict:
+        payload = self._load_final(batch_id)
+        items = _items(payload)
+        candidates = [item for item in items if item.status in {Status.PEC_CONFIRMADO, Status.CID_OMITIDO, Status.PRONTO_PARA_ADICIONAR}]
+        if not candidates: raise ValueError("Nenhum item confirmado pelo PEC está apto à prévia")
+        inspect(self.runner)
+        self._validate_items(candidates)
+        conflicts = self.repository.non_bpi_conflicts(candidates)
+        if conflicts:
+            raise ValueError(
+                f"Foram encontrados {len(conflicts)} atendimentos com origem incompatível com o BPA-I. "
+                "Eles não serão duplicados. Restaure de forma controlada o backup anterior à inclusão antes de gerar nova prévia."
+            )
+        valid_cids = self.repository.validate_cids([item.final_cid for item in candidates])
+        for item in candidates:
+            if item.final_cid and item.final_cid not in valid_cids:
+                item.warnings.append("CID inexistente/duvidoso — produção seguirá sem CID"); item.final_cid = ""
+        errors = self.repository.validate_professionals_and_procedures(candidates, payload["competence"])
+        if errors: raise ValueError("; ".join(errors))
+        matches = self.repository.patient_matches(candidates)
+        for index, item in enumerate(candidates, 1):
+            match = matches.get(index)
+            if match:
+                item.sources["cadcns_match"] = match.get("DB_ID", "")
+                if match.get("DB_NAME", "").strip().upper() != item.patient.name.strip().upper():
+                    item.warnings.append("Grafia do nome difere do CADCNS; identidade confirmada por CNS/CPF/nascimento e cadastro antigo preservado")
+                if match.get("DB_BIRTH") and match.get("DB_BIRTH") != item.patient.birth_date:
+                    item.warnings.append("Nascimento do CADCNS diverge do PEC; cadastro antigo preservado, dados PEC usados somente na nova produção")
+        existing = self.repository.existing_production(payload["competence"], [item.professional_cns for item in candidates])
+        allocate(items, existing)
+        preview = dict(payload)
+        preview["items"] = [item.to_dict() for item in items]
+        preview["based_on_review_sha256"] = payload["review_sha256"]
+        preview["manifest_before"] = self.repository.manifest(payload["competence"], [i.professional_cns for i in candidates])
+        preview.pop("review_sha256", None)
+        preview["review_sha256"] = self.reviews.review_hash(preview)
+        self.reviews.write(batch_id, "previa_firebird.json", preview)
+        self.audit.record(batch_id, "PREVIEW_CREATED", {"ready": sum(i.status == Status.PRONTO_PARA_ADICIONAR for i in items)})
+        return preview
+
+    def write(self, batch_id: str, confirmation: str) -> dict:
+        if confirmation != "ADICIONAR": raise ValueError("Confirmação inválida; digite exatamente ADICIONAR")
+        ensure_bpa_closed()
+        final = self._load_final(batch_id)
+        preview = self.reviews.read(batch_id, "previa_firebird.json")
+        self.reviews.verify_hash(preview)
+        if preview.get("based_on_review_sha256") != final.get("review_sha256"):
+            raise ValueError("A revisão mudou depois da prévia; gere uma nova prévia")
+        inspect(self.runner)
+        previous_allocation = {item["row"]: (item.get("sheet"), item.get("sequence"), item.get("status")) for item in preview["items"]}
+        refreshed = self.preview(batch_id)
+        current_allocation = {item["row"]: (item.get("sheet"), item.get("sequence"), item.get("status")) for item in refreshed["items"]}
+        if current_allocation != previous_allocation:
+            raise ValueError("O banco mudou desde a prévia; a prévia foi recalculada. Revise e confirme novamente")
+        ready = [item for item in _items(refreshed) if item.status == Status.PRONTO_PARA_ADICIONAR]
+        if not ready: return {"status":"SEM_PENDENCIAS","inserted":0,"failures":[]}
+        manifest_before = self.repository.manifest(final["competence"], [i.professional_cns for i in ready])
+        backup = create_backup(self.helper_backup, self.database, self.backups, self.credential_target)
+        output = self.runner.run(build_insert_script(ready, final["competence"]), allow_insert=True, timeout=600)
+        failures = verify_output(output, len(ready))
+        manifest_after = self.repository.manifest(final["competence"], [i.professional_cns for i in ready])
+        inserted_by_manifest = manifest_after["total"] - manifest_before["total"]
+        if inserted_by_manifest != len(ready):
+            failures.append(f"Manifesto: diferença total {inserted_by_manifest}, esperados {len(ready)} INSERTs autorizados")
+        result = {"status":"VERIFICADO" if not failures else "VERIFICACAO_COM_FALHAS", "inserted":len(ready)-len(failures),
+                  "expected":len(ready), "failures":failures, "backup":str(backup), "manifest_before":manifest_before, "manifest_after":manifest_after}
+        self.reviews.write(batch_id, "resultado_gravacao.json", result)
+        self.audit.record(batch_id, "WRITE_FINISHED", {"status":result["status"],"inserted":result["inserted"],"backup":backup.name})
+        return result
+
+    def _load_final(self, batch_id: str) -> dict:
+        try: payload = self.reviews.read(batch_id, "revisao_final.json")
+        except FileNotFoundError: payload = self.reviews.read(batch_id, "revisao_planilha.json")
+        self.reviews.verify_hash(payload)
+        if not BatchService.source_unchanged(payload): raise ValueError("A planilha de origem foi alterada; importe novamente")
+        return payload
+
+    @staticmethod
+    def _validate_items(items: list[ReviewItem]) -> None:
+        errors = []
+        for item in items:
+            if not valid_cpf(item.patient.cpf): errors.append(f"linha {item.row}: CPF não confirmado")
+            if not valid_cns(item.patient.cns): errors.append(f"linha {item.row}: CNS não confirmado")
+            if len(item.patient.birth_date) != 8: errors.append(f"linha {item.row}: nascimento ausente")
+            if not item.patient.name: errors.append(f"linha {item.row}: nome PEC ausente")
+        if errors: raise ValueError("; ".join(errors))

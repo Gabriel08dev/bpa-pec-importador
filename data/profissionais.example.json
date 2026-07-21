@@ -1,0 +1,21 @@
+{
+  "professionals": [
+    {
+      "name": "Ana Profissional Exemplo",
+      "specialty": "Cardiologista",
+      "cns": "700000000000005",
+      "cbo": "225120",
+      "cnes": "0000000",
+      "procedure": "0301010072"
+    },
+    {
+      "name": "Bruno Profissional Exemplo",
+      "specialty": "Nutricionista",
+      "cns": "700000000000013",
+      "cbo": "223710",
+      "cnes": "0000000",
+      "procedure": "0301010048",
+      "create_if_missing": true
+    }
+  ]
+}

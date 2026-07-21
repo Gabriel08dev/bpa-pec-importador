@@ -1,0 +1,35 @@
+# Ambientes e caches Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Dados locais sensíveis e artefatos operacionais
+.pec_profile/
+outputs/
+backups/
+.diagnostics/
+data/config.json
+data/profissionais.json
+
+# Bases, backups, relatórios e planilhas com possíveis dados pessoais
+*.gdb
+*.fdb
+*.fbk
+*.xlsx
+*.xls
+*.csv
+*.tsv
+*.pdf
+
+# Binários legados/terceiros instalados localmente
+firebird/bin/*.exe
+firebird/bin/*.dll
+
+# Arquivos locais e de sistema
+.env
+.env.*
+*.log
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Importador CEAE — PEC e BPA</title>
+  <link rel="stylesheet" href="/static/style.css?token={{ token }}">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero__inner">
+      <div>
+        <p class="eyebrow">CEAE · Processamento local</p>
+        <h1>Importador PEC e BPA</h1>
+        <p>Revisão de atendimentos, consulta segura ao PEC e inclusão protegida no BPA.</p>
+      </div>
+      <div class="security-badge" aria-label="Aplicação executada somente neste computador">
+        <span class="security-badge__dot" aria-hidden="true"></span>
+        <div><strong>Ambiente protegido</strong><small>Somente neste computador</small></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <div class="dashboard-grid">
+      <section class="card card--primary">
+        <div class="section-heading">
+          <div class="heading-with-step">
+            <span class="step-number">1</span>
+            <div><h2>Importar planilha</h2><p>Selecione a competência e o arquivo conferido para iniciar uma nova revisão.</p></div>
+          </div>
+        </div>
+        <form class="form-grid" method="post" action="/importar?token={{ token }}" enctype="multipart/form-data">
+          <label class="field">Competência de apresentação
+            <input name="competence" pattern="[0-9]{6}" placeholder="202607" inputmode="numeric" required>
+            <small>Use seis números no formato AAAAMM.</small>
+          </label>
+          <label class="field">Planilha de atendimentos
+            <input type="file" name="file" accept=".xlsx,.csv,.tsv" required>
+            <small>Formatos aceitos: Excel, CSV e TSV.</small>
+          </label>
+          <button type="submit">Importar e revisar <span aria-hidden="true">→</span></button>
+        </form>
+      </section>
+
+      <aside class="stack">
+        <section class="card">
+          <div class="section-heading"><div><h2>Ferramentas</h2><p>Arquivos auxiliares e cópias de segurança.</p></div></div>
+          <div class="stack">
+            <div class="quick-action">
+              <span class="quick-action__icon" aria-hidden="true">XLS</span>
+              <div class="quick-action__body"><strong>Planilha modelo</strong><small>Baixe o arquivo já formatado.</small></div>
+              <a class="button secondary" href="/modelo.xlsx?token={{ token }}">Baixar</a>
+            </div>
+            <div class="quick-action">
+              <span class="quick-action__icon" aria-hidden="true">BK</span>
+              <div class="quick-action__body"><strong>Backups</strong><small>Abra a pasta protegida.</small></div>
+              <form method="post" action="/abrir-backups?token={{ token }}"><button class="secondary" type="submit">Abrir</button></form>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="card">
+      <div class="section-heading">
+        <div class="heading-with-step">
+          <span class="step-number">2</span>
+          <div><h2>Lotes de trabalho</h2><p>Abra um lote para consultar o PEC, gerar a prévia ou conferir o resultado.</p></div>
+        </div>
+      </div>
+      {% if batches %}
+      <ul class="batch-list">
+        {% for batch in batches %}
+        <li><a class="batch-link" href="/lote/{{ batch }}?token={{ token }}"><span class="batch-link__icon" aria-hidden="true">›</span><span>{{ batch }}</span></a></li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty-state">Nenhum lote importado. Use o formulário acima para começar.</div>
+      {% endif %}
+    </section>
+  </main>
+  <footer>Dados pessoais sensíveis · acesso local · sem cache · sem exposição na rede</footer>
+</body>
+</html>

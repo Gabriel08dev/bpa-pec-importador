@@ -1,0 +1,5 @@
+{
+  "database": "localhost:C:\\Program Files (x86)\\Datasus\\BPA\\BPAMAG.GDB",
+  "bpa_executable": "C:\\Program Files (x86)\\Datasus\\BPA\\bpamag.exe",
+  "pec_url": "https://pec.exemplo.gov.br"
+}
