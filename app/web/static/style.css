@@ -1083,60 +1083,8 @@ body.error #message { background: var(--danger-soft); color: var(--danger); }
   letter-spacing: .02em;
 }
 
-.session-logout {
-  margin-top: 12px;
-}
-
-.session-logout button {
-  min-height: 32px;
-  padding: 6px 18px;
-  border: 1px solid rgba(226, 232, 255, .34);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, .08);
-  box-shadow: none;
-  color: #f4f7ff;
-  font-size: .75rem;
-  font-weight: 700;
-}
-
-.session-logout button:hover {
-  border-color: rgba(103, 232, 249, .68);
-  background: rgba(103, 232, 249, .12);
-  transform: none;
-}
-
 .process-page > footer.system-footer {
   align-self: end;
-}
-
-.access-link-layout {
-  min-height: calc(100vh - 250px);
-  display: grid;
-  place-items: center;
-}
-
-.access-link-card {
-  width: min(760px, 100%);
-  display: grid;
-  gap: 22px;
-}
-
-.access-link-card input[readonly] {
-  width: 100%;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.access-link-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.access-link-status {
-  min-height: 24px;
-  margin: 0;
-  color: var(--accent-strong);
-  font-weight: 700;
 }
 
 @media (max-width: 900px) {

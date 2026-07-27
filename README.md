@@ -4,7 +4,7 @@ Aplicação local para Windows que importa atendimentos do CEAE, consulta o PEC 
 
 ## Tecnologia escolhida
 
-Python 3.12 foi escolhido porque reúne, no mesmo runtime para Windows, Playwright com Microsoft Edge, leitura de Excel, PDF, OCR opcional, acesso ao Gerenciador de Credenciais e uma interface HTTP local. FastAPI atende somente em `127.0.0.1:51500`; o acesso começa por um token secreto e passa para uma sessão protegida. Os binários `isql` e `gbak` do Firebird 1.5 já validados neste computador são usados como `fb_query.exe` e `fb_backup.exe`; isso evita depender de um driver moderno incompatível com a base legada.
+Python 3.12 foi escolhido porque reúne, no mesmo runtime para Windows, Playwright com Microsoft Edge, leitura de Excel, PDF, OCR opcional, acesso ao Gerenciador de Credenciais e uma interface HTTP local. FastAPI atende somente em `127.0.0.1`, usando uma porta local disponível escolhida a cada execução; o acesso começa por um token secreto e passa para uma sessão protegida. Os binários `isql` e `gbak` do Firebird 1.5 já validados neste computador são usados como `fb_query.exe` e `fb_backup.exe`; isso evita depender de um driver moderno incompatível com a base legada.
 
 ## Instalação e abertura
 
@@ -71,10 +71,9 @@ Os backups ficam em `backups/BPAMAG_ANTES_IMPORTACAO_AAAAMMDD_HHMMSS.fbk`. A apl
 
 ## Segurança e LGPD
 
-- Servidor vinculado exclusivamente a `127.0.0.1:51500`. São aceitos somente `localhost`, endereços loopback e subdomínios temporários terminados exatamente em `.trycloudflare.com`.
-- Para acesso externo, use o atalho `BPA System — Acesso externo`. Ele inicia ou reutiliza um Cloudflare Quick Tunnel, abre o endereço já autenticado e mantém o token obrigatório. Não execute o túnel manualmente com `--http-host-header`, pois isso altera a origem percebida nas operações POST.
-- O token de 256 bits é usado apenas no primeiro acesso. Depois da validação, ele é retirado da URL e substituído por sessão de 8 horas em cookie `HttpOnly`, `Secure` e `SameSite=Strict`. O botão **Sair** revoga a sessão.
-- Para um túnel temporário, a origem local permanece `http://127.0.0.1:51500`. Domínios arbitrários, origens cruzadas e requisições sem token ou sessão válida são recusados.
+- Servidor vinculado exclusivamente a `127.0.0.1`, em uma porta local disponível. Somente o próprio computador pode estabelecer conexão.
+- O token de 256 bits é usado apenas no primeiro acesso. Depois da validação, ele é retirado da URL e substituído por uma sessão local de 8 horas em cookie `HttpOnly` e `SameSite=Strict`.
+- Não há publicação em rede, túnel, domínio externo ou acesso por outros computadores nesta versão.
 - CSP, `Cache-Control: no-store`, `X-Frame-Options: DENY` e `Referrer-Policy: no-referrer` continuam ativos.
 - Senhas ficam no Credential Manager nos alvos `BPA_PEC_IMPORTADOR_FIREBIRD` e `BPA_PEC_IMPORTADOR_PEC` e chegam ao Firebird somente por ambiente do subprocesso.
 - Nenhuma senha é passada na linha de comando, arquivo SQL, JSON ou log.

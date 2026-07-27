@@ -117,7 +117,6 @@
       </article>
     </section>
 
-    {% if is_local|default(false) %}
     <section class="card recent-lots" aria-labelledby="recent-lots-title">
       <div class="section-heading">
         <div><p class="card-kicker">Continuidade</p><h2 id="recent-lots-title">Lotes recentes</h2><p>Continue exatamente da etapa disponível, sem pular revisões ou confirmações.</p></div>
@@ -144,18 +143,10 @@
       <div class="empty-state">Nenhum lote criado. Escolha uma das origens acima para começar.</div>
       {% endif %}
     </section>
-    {% endif %}
 
     <section class="support-section" aria-labelledby="support-title">
       <div class="section-heading"><div><p class="card-kicker">Apoio</p><h2 id="support-title">Ferramentas e suporte</h2><p>Recursos auxiliares sem acesso direto às etapas protegidas.</p></div></div>
       <div class="support-grid">
-        {% if is_local|default(false) %}
-        <div class="quick-action">
-          <span class="quick-action__icon" aria-hidden="true">WEB</span>
-          <div class="quick-action__body"><strong>Acesso em outros computadores</strong><small>Copie o link reutilizável enquanto o túnel estiver ativo.</small></div>
-          <a class="button secondary" href="/acesso-externo/gerar">Gerar acesso</a>
-        </div>
-        {% endif %}
         <div class="quick-action">
           <span class="quick-action__icon" aria-hidden="true">XLS</span>
           <div class="quick-action__body"><strong>Planilha modelo</strong><small>Arquivo formatado para novos atendimentos.</small></div>
@@ -172,7 +163,6 @@
   <footer class="system-footer">
     <span class="system-footer__brand">BPA System &mdash; Desenvolvido por Gabriel da Silva Fonseca</span>
     <span class="system-footer__note">Dados pessoais sensíveis · acesso local · sem cache · sem exposição na rede</span>
-    <form class="session-logout" method="post" action="/sair"><button type="submit">Sair</button></form>
   </footer>
 </body>
 </html>

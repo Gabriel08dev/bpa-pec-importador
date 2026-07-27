@@ -8,19 +8,17 @@ import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import Settings
-from app.credentials import read_credential, write_credential
+from app.credentials import write_credential
 from app.models import ReviewItem, Status
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.firebird_repository import FirebirdRepository
 from app.repositories.review_repository import ReviewRepository
-from app.security import clear_session_cookie, end_session
 from app.services.batch_service import BatchService, validate_competence
 from app.services.dashboard_service import environment_summary, recent_batches
 from app.services.divergence_service import generate_ignored_csv, generate_pdf
@@ -33,19 +31,7 @@ from app.services.spreadsheet_service import create_template
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 JOBS: dict[str, dict[str, Any]] = {}
-TUNNEL_CREDENTIAL_TARGET = "BPA_SYSTEM_CLOUDFLARE_URL"
-LOCAL_TOKEN_CREDENTIAL_TARGET = "BPA_SYSTEM_LOCAL_ACCESS"
-
-
 def services(request: Request): return request.app.state.services
-
-
-def _request_is_local(request: Request) -> bool:
-    try:
-        hostname = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
-    except ValueError:
-        return False
-    return hostname.rstrip(".").lower() in {"localhost", "127.0.0.1", "::1"}
 
 
 def start_job(label: str, action, kind: str = "") -> str:
@@ -65,32 +51,6 @@ def start_job(label: str, action, kind: str = "") -> str:
 def health(): return {"status":"ok"}
 
 
-@router.post("/sair", response_class=HTMLResponse)
-def logout(request: Request):
-    end_session(request)
-    response = HTMLResponse(
-        """<!doctype html>
-<html lang="pt-BR">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Sessão encerrada</title>
-  <style>
-    body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
-    background:#f5f6fb;color:#171b38;font:16px/1.5 system-ui,-apple-system,sans-serif}
-    main{max-width:560px;padding:38px;border:1px solid #dfe3f2;border-radius:22px;
-    background:#fff;box-shadow:0 18px 55px rgba(17,21,46,.12);text-align:center}
-    h1{margin:0 0 10px;font-size:1.55rem}p{margin:0;color:#626a83}
-  </style>
-</head>
-<body><main><h1>Sessão encerrada</h1>
-<p>O acesso foi encerrado com segurança. Use novamente o link protegido com token para entrar.</p>
-</main></body></html>"""
-    )
-    clear_session_cookie(response)
-    return response
-
-
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     svc = services(request)
@@ -106,58 +66,7 @@ def home(request: Request):
             "recent_batches": recent_batches(svc["settings"].outputs),
             "environment": environment_summary(svc["settings"].backups, pec_running),
             "pec_running": pec_running,
-            "is_local": _request_is_local(request),
         },
-    )
-
-
-@router.get("/acesso-externo/gerar", response_class=HTMLResponse)
-def generate_external_access(request: Request):
-    if not _request_is_local(request):
-        raise HTTPException(
-            status_code=403,
-            detail="Novos acessos externos só podem ser gerados no computador principal.",
-        )
-    credential = read_credential(TUNNEL_CREDENTIAL_TARGET)
-    tunnel_url = credential[1].strip().rstrip("/") if credential else ""
-    try:
-        parsed = urlsplit(tunnel_url)
-    except ValueError:
-        parsed = None
-    if (
-        not parsed
-        or parsed.scheme.lower() != "https"
-        or not (parsed.hostname or "").lower().endswith(".trycloudflare.com")
-    ):
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {
-                "title": "Acesso externo ainda não iniciado",
-                "message": (
-                    "Abra primeiro o atalho “BPA System — Acesso externo” "
-                    "na Área de Trabalho e tente novamente."
-                ),
-            },
-            status_code=409,
-        )
-    token_credential = read_credential(LOCAL_TOKEN_CREDENTIAL_TARGET)
-    if not token_credential or not token_credential[1]:
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {
-                "title": "Token local indisponível",
-                "message": "Reabra o atalho principal do BPA System e tente novamente.",
-            },
-            status_code=409,
-        )
-    token = token_credential[1]
-    access_url = f"{tunnel_url}/?{urlencode({'token': token})}"
-    return templates.TemplateResponse(
-        request,
-        "access_link.html",
-        {"access_url": access_url},
     )
 
 
