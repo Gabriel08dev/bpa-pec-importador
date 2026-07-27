@@ -5,20 +5,24 @@ import os
 import shutil
 import threading
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.config import Settings
-from app.credentials import write_credential
+from app.credentials import read_credential, write_credential
 from app.models import ReviewItem, Status
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.firebird_repository import FirebirdRepository
 from app.repositories.review_repository import ReviewRepository
-from app.services.batch_service import BatchService
+from app.security import clear_session_cookie, end_session
+from app.services.batch_service import BatchService, validate_competence
+from app.services.dashboard_service import environment_summary, recent_batches
 from app.services.divergence_service import generate_ignored_csv, generate_pdf
 from app.services.firebird_workflow import FirebirdWorkflow
 from app.services.pec_service import PecService
@@ -29,14 +33,24 @@ from app.services.spreadsheet_service import create_template
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 JOBS: dict[str, dict[str, Any]] = {}
+TUNNEL_CREDENTIAL_TARGET = "BPA_SYSTEM_CLOUDFLARE_URL"
+LOCAL_TOKEN_CREDENTIAL_TARGET = "BPA_SYSTEM_LOCAL_ACCESS"
 
 
 def services(request: Request): return request.app.state.services
 
 
-def start_job(label: str, action) -> str:
+def _request_is_local(request: Request) -> bool:
+    try:
+        hostname = urlsplit(f"//{request.headers.get('host', '')}").hostname or ""
+    except ValueError:
+        return False
+    return hostname.rstrip(".").lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def start_job(label: str, action, kind: str = "") -> str:
     job_id = uuid.uuid4().hex
-    JOBS[job_id] = {"status":"RUNNING","message":label,"progress":[]}
+    JOBS[job_id] = {"status":"RUNNING","message":label,"progress":[],"kind":kind}
     def run():
         try:
             result = action(lambda message: JOBS[job_id]["progress"].append(message))
@@ -51,11 +65,100 @@ def start_job(label: str, action) -> str:
 def health(): return {"status":"ok"}
 
 
+@router.post("/sair", response_class=HTMLResponse)
+def logout(request: Request):
+    end_session(request)
+    response = HTMLResponse(
+        """<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sessão encerrada</title>
+  <style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+    background:#f5f6fb;color:#171b38;font:16px/1.5 system-ui,-apple-system,sans-serif}
+    main{max-width:560px;padding:38px;border:1px solid #dfe3f2;border-radius:22px;
+    background:#fff;box-shadow:0 18px 55px rgba(17,21,46,.12);text-align:center}
+    h1{margin:0 0 10px;font-size:1.55rem}p{margin:0;color:#626a83}
+  </style>
+</head>
+<body><main><h1>Sessão encerrada</h1>
+<p>O acesso foi encerrado com segurança. Use novamente o link protegido com token para entrar.</p>
+</main></body></html>"""
+    )
+    clear_session_cookie(response)
+    return response
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     svc = services(request)
-    batches = sorted([path.name for path in svc["settings"].outputs.iterdir() if path.is_dir() and path.name != "uploads"], reverse=True)
-    return templates.TemplateResponse(request, "index.html", {"token":request.query_params["token"],"batches":batches})
+    pec_running = any(
+        job.get("status") == "RUNNING" and job.get("kind") == "PEC_DISCOVERY"
+        for job in JOBS.values()
+    )
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "default_competence": datetime.now().strftime("%Y%m"),
+            "recent_batches": recent_batches(svc["settings"].outputs),
+            "environment": environment_summary(svc["settings"].backups, pec_running),
+            "pec_running": pec_running,
+            "is_local": _request_is_local(request),
+        },
+    )
+
+
+@router.get("/acesso-externo/gerar", response_class=HTMLResponse)
+def generate_external_access(request: Request):
+    if not _request_is_local(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Novos acessos externos só podem ser gerados no computador principal.",
+        )
+    credential = read_credential(TUNNEL_CREDENTIAL_TARGET)
+    tunnel_url = credential[1].strip().rstrip("/") if credential else ""
+    try:
+        parsed = urlsplit(tunnel_url)
+    except ValueError:
+        parsed = None
+    if (
+        not parsed
+        or parsed.scheme.lower() != "https"
+        or not (parsed.hostname or "").lower().endswith(".trycloudflare.com")
+    ):
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Acesso externo ainda não iniciado",
+                "message": (
+                    "Abra primeiro o atalho “BPA System — Acesso externo” "
+                    "na Área de Trabalho e tente novamente."
+                ),
+            },
+            status_code=409,
+        )
+    token_credential = read_credential(LOCAL_TOKEN_CREDENTIAL_TARGET)
+    if not token_credential or not token_credential[1]:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Token local indisponível",
+                "message": "Reabra o atalho principal do BPA System e tente novamente.",
+            },
+            status_code=409,
+        )
+    token = token_credential[1]
+    access_url = f"{tunnel_url}/?{urlencode({'token': token})}"
+    return templates.TemplateResponse(
+        request,
+        "access_link.html",
+        {"access_url": access_url},
+    )
 
 
 @router.get("/modelo.xlsx")
@@ -67,7 +170,17 @@ def model(request: Request):
 
 @router.post("/importar")
 async def import_file(request: Request, competence: str = Form(...), file: UploadFile = File(...)):
-    svc = services(request); suffix = Path(file.filename or "").suffix.lower()
+    svc = services(request)
+    try:
+        validate_competence(competence)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"message": str(exc)},
+            status_code=400,
+        )
+    suffix = Path(file.filename or "").suffix.lower()
     if suffix not in {".xlsx",".csv",".tsv"}: raise HTTPException(400, "Use .xlsx, .csv ou .tsv")
     upload_dir = svc["settings"].outputs / "uploads"; upload_dir.mkdir(exist_ok=True)
     destination = upload_dir / f"{uuid.uuid4().hex}{suffix}"
@@ -79,11 +192,59 @@ async def import_file(request: Request, competence: str = Form(...), file: Uploa
         return templates.TemplateResponse(
             request,
             "error.html",
-            {"token": request.query_params["token"], "message": str(exc)},
+            {"message": str(exc)},
             status_code=400,
         )
     svc["audit"].record(batch_id, "SPREADSHEET_IMPORTED", {"filename":Path(file.filename or "planilha").name})
-    return RedirectResponse(f"/lote/{batch_id}?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse(f"/lote/{batch_id}", status_code=303)
+
+
+@router.post("/pec/lista-atendimentos")
+def import_from_pec_list(
+    request: Request,
+    competence: str = Form(...),
+    start_date: str = Form(...),
+    end_date: str = Form(...),
+):
+    svc = services(request)
+    try:
+        validate_competence(competence)
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+        if end < start:
+            raise ValueError("A data final não pode ser anterior à data inicial.")
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"message": str(exc)},
+            status_code=400,
+        )
+    if any(
+        job.get("status") == "RUNNING" and job.get("kind") == "PEC_DISCOVERY"
+        for job in JOBS.values()
+    ):
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {"message": "Já existe uma busca em andamento."},
+            status_code=409,
+        )
+
+    def action(progress):
+        records = svc["pec"].discover(start_date, end_date, progress)
+        batch_id, payload = svc["batch"].import_pec_attendances(
+            records, competence, start_date, end_date
+        )
+        svc["audit"].record(
+            batch_id,
+            "PEC_ATTENDANCE_LIST_IMPORTED",
+            {"items": len(payload["items"]), "period_start": start_date, "period_end": end_date},
+        )
+        return {"redirect": f"/lote/{batch_id}"}
+
+    job = start_job("Buscando atendimentos diretamente no PEC", action, kind="PEC_DISCOVERY")
+    return RedirectResponse(f"/trabalho/{job}", status_code=303)
 
 
 @router.get("/lote/{batch_id}", response_class=HTMLResponse)
@@ -100,7 +261,73 @@ def batch_view(request: Request, batch_id: str):
     except FileNotFoundError: pass
     try: result = svc["reviews"].read(batch_id, "resultado_gravacao.json")
     except FileNotFoundError: pass
-    return templates.TemplateResponse(request, "batch.html", {"token":request.query_params["token"],"payload":payload,"preview":preview,"result":result})
+    return templates.TemplateResponse(request, "batch.html", {"payload":payload,"preview":preview,"result":result})
+
+
+@router.post("/lote/{batch_id}/cids")
+async def import_batch_cids(
+    request: Request,
+    batch_id: str,
+    file: UploadFile = File(...),
+):
+    svc = services(request)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".xlsx", ".csv", ".tsv"}:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "message": "Use uma planilha .xlsx, .csv ou .tsv",
+                "return_url": f"/lote/{batch_id}",
+                "return_label": "Voltar ao lote",
+            },
+            status_code=400,
+        )
+
+    upload_dir = svc["settings"].outputs / "uploads"
+    upload_dir.mkdir(exist_ok=True)
+    destination = upload_dir / f"{uuid.uuid4().hex}{suffix}"
+    with destination.open("wb") as stream:
+        shutil.copyfileobj(file.file, stream)
+    try:
+        summary = svc["batch"].import_cids_into_pec_batch(
+            batch_id,
+            destination,
+            file.filename or "planilha-cids",
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Não foi possível cruzar os CIDs",
+                "message": str(exc),
+                "guidance": (
+                    "Nenhum CID duvidoso foi atribuído. Confira CPF, data do atendimento, "
+                    "profissional e CID na planilha."
+                ),
+                "return_url": f"/lote/{batch_id}",
+                "return_label": "Voltar ao lote",
+            },
+            status_code=400,
+        )
+    finally:
+        destination.unlink(missing_ok=True)
+
+    svc["audit"].record(
+        batch_id,
+        "CIDS_MATCHED_FROM_SPREADSHEET",
+        {
+            "matched_keys": summary["matched_keys"],
+            "matched_items": summary["matched_items"],
+            "invalid_rows": len(summary["invalid_rows"]),
+            "conflict_rows": len(summary["conflict_rows"]),
+        },
+    )
+    return RedirectResponse(
+        f"/lote/{batch_id}",
+        status_code=303,
+    )
 
 
 @router.post("/lote/{batch_id}/pec")
@@ -110,7 +337,9 @@ def consult_pec(request: Request, batch_id: str):
         payload = svc["reviews"].read(batch_id, "revisao_planilha.json")
         svc["reviews"].verify_hash(payload)
         items = [ReviewItem.from_dict(item) for item in payload["items"]]
-        svc["pec"].consult(items, progress)
+        # A planilha (ou o lote descoberto) define os atendimentos. Aqui o PEC
+        # é usado somente para completar/confirmar a identidade cadastral.
+        svc["pec"].consult(items, progress, validate_attendance=False)
         for item in items:
             if item.status == Status.PEC_CONFIRMADO and item.original_cid and not item.final_cid:
                 item.status = Status.CID_OMITIDO
@@ -118,9 +347,9 @@ def consult_pec(request: Request, batch_id: str):
         updated = svc["batch"].update_review(batch_id, payload)
         svc["reviews"].write(batch_id, "lote_revisado.json", updated)
         svc["audit"].record(batch_id, "PEC_CONSULTED", {"items":len(items)})
-        return {"redirect":f"/lote/{batch_id}?token={request.query_params['token']}"}
+        return {"redirect":f"/lote/{batch_id}"}
     job = start_job("Consultando o PEC", action)
-    return RedirectResponse(f"/trabalho/{job}?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse(f"/trabalho/{job}", status_code=303)
 
 
 @router.post("/lote/{batch_id}/relatorio")
@@ -144,16 +373,15 @@ def preview(request: Request, batch_id: str):
             request,
             "error.html",
             {
-                "token": request.query_params["token"],
                 "title": "Não foi possível gerar a prévia do Firebird",
                 "message": str(exc),
                 "guidance": "Nenhum registro foi gravado. Volte ao lote, corrija a pendência indicada e tente novamente.",
-                "return_url": f"/lote/{batch_id}?token={request.query_params['token']}",
+                "return_url": f"/lote/{batch_id}",
                 "return_label": "Voltar ao lote",
             },
             status_code=400,
         )
-    return RedirectResponse(f"/lote/{batch_id}?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse(f"/lote/{batch_id}", status_code=303)
 
 
 @router.post("/lote/{batch_id}/gravar")
@@ -165,15 +393,15 @@ def write(request: Request, batch_id: str, confirmation: str = Form(...)):
         progress("Criando backup antes dos INSERTs")
         result = svc["workflow"].write(batch_id, confirmation)
         progress("Verificando cada registro após o COMMIT")
-        return {"redirect":f"/lote/{batch_id}?token={request.query_params['token']}","write_result":result}
+        return {"redirect":f"/lote/{batch_id}","write_result":result}
     job = start_job("Preparando gravação protegida", action)
-    return RedirectResponse(f"/trabalho/{job}?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse(f"/trabalho/{job}", status_code=303)
 
 
 @router.get("/trabalho/{job_id}", response_class=HTMLResponse)
 def job_page(request: Request, job_id: str):
     if job_id not in JOBS: raise HTTPException(404, "Trabalho não encontrado")
-    return templates.TemplateResponse(request, "job.html", {"token":request.query_params["token"],"job_id":job_id})
+    return templates.TemplateResponse(request, "job.html", {"job_id":job_id})
 
 
 @router.get("/api/trabalho/{job_id}")
@@ -185,23 +413,23 @@ def job_status(job_id: str):
 @router.post("/credenciais/firebird")
 def firebird_credential(request: Request, username: str = Form(...), password: str = Form(...)):
     write_credential(services(request)["settings"].credential_firebird, username, password)
-    return RedirectResponse(f"/?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 @router.post("/credenciais/pec")
 def pec_credential(request: Request, username: str = Form(...), password: str = Form(...)):
     write_credential(services(request)["settings"].credential_pec, username, password)
-    return RedirectResponse(f"/?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 @router.post("/abrir-backups")
 def open_backups(request: Request):
     os.startfile(services(request)["settings"].backups)
-    return RedirectResponse(f"/?token={request.query_params['token']}", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 def build_services(settings: Settings) -> dict[str, Any]:
-    professionals = ProfessionalRegistry(settings.professionals_file)
+    professionals = ProfessionalRegistry(settings.professionals_file, settings.ceae_cnes)
     reviews = ReviewRepository(settings.outputs); audit = AuditRepository(settings.outputs)
     from app.firebird.legacy_runner import LegacyRunner
     runner = LegacyRunner(settings.helper_query, settings.database, settings.credential_firebird)
@@ -209,4 +437,4 @@ def build_services(settings: Settings) -> dict[str, Any]:
     return {"settings":settings,"professionals":professionals,"reviews":reviews,"audit":audit,
             "batch":BatchService(professionals,reviews),
             "pec":PecService(settings.pec_url,str(settings.profile),settings.credential_pec),
-            "workflow":FirebirdWorkflow(reviews,audit,runner,repository,settings.helper_backup,settings.backups,settings.credential_firebird,settings.database)}
+            "workflow":FirebirdWorkflow(reviews,audit,runner,repository,settings.helper_backup,settings.backups,settings.credential_firebird,settings.database,settings.ceae_cnes)}

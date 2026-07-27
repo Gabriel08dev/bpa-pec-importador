@@ -3,7 +3,17 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from app.models import ReviewItem
+from app.models import ReviewItem, Status
+
+
+CID_UPDATE_STATUSES = {
+    Status.PRONTO_PARA_ATUALIZAR_CID,
+    Status.PRONTO_PARA_CORRIGIR_CNES_E_CID,
+}
+CNES_UPDATE_STATUSES = {
+    Status.PRONTO_PARA_CORRIGIR_CNES,
+    Status.PRONTO_PARA_CORRIGIR_CNES_E_CID,
+}
 
 
 def literal(value: object) -> str:
@@ -64,17 +74,114 @@ def verification_select(item: ReviewItem, competence: str, index: int) -> str:
     return f"SELECT COUNT(*) AS VERIFY_{index} FROM S_PRD WHERE PRD_CNSMED={literal(item.professional_cns)} AND PRD_UID={literal(item.cnes)} AND PRD_CBO={literal(item.cbo)} AND PRD_CMP={literal(competence)} AND PRD_ORG='BPI' AND PRD_FLH={literal(item.sheet)} AND PRD_SEQ={literal(item.sequence)} AND PRD_DTATEN={literal(item.service_date)} AND PRD_PA={literal(item.procedure)} AND PRD_CPF_PCNTE={literal(p.cpf)} AND PRD_CNSPAC={literal(p.cns)} AND PRD_DTNASC={literal(p.birth_date)} AND {cid_condition};"
 
 
-def build_insert_script(items: list[ReviewItem], competence: str) -> str:
-    statements = ["SET LIST ON;", "SET TRANSACTION;"]
-    added_professionals: set[str] = set()
-    for item in items:
-        if item.professional_cns not in added_professionals:
-            statements.append(professional_inserts(item)); added_professionals.add(item.professional_cns)
+def production_update(item: ReviewItem, competence: str) -> str:
+    """Corrige somente campos autorizados numa produção existente identificada exatamente."""
+    update_cid = item.status in CID_UPDATE_STATUSES
+    update_cnes = item.status in CNES_UPDATE_STATUSES
+    if not update_cid and not update_cnes:
+        raise ValueError("Item não está marcado para atualização")
+    if update_cid and not item.final_cid:
+        raise ValueError("Atualização de CID exige um CID válido")
+    assignments = []
+    if update_cnes:
+        assignments.extend(
+            [
+                f"PRD_UID={literal(item.cnes)}",
+                f"PRD_FLH={literal(item.sheet)}",
+                f"PRD_SEQ={literal(item.sequence)}",
+            ]
+        )
+    if update_cid:
+        assignments.append(f"PRD_CID={literal(item.final_cid)}")
+    old_cnes = item.sources.get("existing_cnes", item.cnes)
+    old_sheet = item.sources.get("existing_sheet", item.sheet)
+    old_sequence = item.sources.get("existing_sequence", item.sequence)
+    origin_guard = (
+        f"\n  AND PRD_ORG={literal(item.sources['existing_origin'])}"
+        if item.sources.get("existing_origin")
+        else ""
+    )
+    cid_guard = "\n  AND (PRD_CID IS NULL OR PRD_CID='')" if update_cid else ""
+    return f"""
+UPDATE S_PRD SET {','.join(assignments)}
+WHERE PRD_CNSMED={literal(item.professional_cns)}
+  AND PRD_UID={literal(old_cnes)}
+  AND PRD_CBO={literal(item.cbo)}
+  AND PRD_CMP={literal(competence)}
+  AND PRD_DTATEN={literal(item.service_date)}
+  AND PRD_FLH={literal(old_sheet)}
+  AND PRD_SEQ={literal(old_sequence)}
+  AND PRD_CPF_PCNTE={literal(item.patient.cpf)}{origin_guard}{cid_guard};
+"""
+
+
+def production_update_verification(item: ReviewItem, competence: str, index: int) -> str:
+    cid = (
+        item.final_cid
+        if item.status in CID_UPDATE_STATUSES
+        else item.sources.get("existing_cid", "")
+    )
+    cid_condition = (
+        "(PRD_CID IS NULL OR PRD_CID='')"
+        if not cid
+        else f"PRD_CID={literal(cid)}"
+    )
+    return (
+        f"SELECT COUNT(*) AS VERIFY_UPDATE_{index} FROM S_PRD "
+        f"WHERE PRD_CNSMED={literal(item.professional_cns)} "
+        f"AND PRD_UID={literal(item.cnes)} "
+        f"AND PRD_CBO={literal(item.cbo)} "
+        f"AND PRD_CMP={literal(competence)} "
+        f"AND PRD_DTATEN={literal(item.service_date)} "
+        f"AND PRD_FLH={literal(item.sheet)} "
+        f"AND PRD_SEQ={literal(item.sequence)} "
+        f"AND PRD_CPF_PCNTE={literal(item.patient.cpf)} "
+        f"AND {cid_condition};"
+    )
+
+
+def cid_update(item: ReviewItem, competence: str) -> str:
+    """Compatibilidade: gera a atualização segura do item marcado para CID."""
+    return production_update(item, competence)
+
+
+def cid_update_verification(item: ReviewItem, competence: str, index: int) -> str:
+    return production_update_verification(item, competence, index)
+
+
+def build_write_script(
+    insert_items: list[ReviewItem],
+    update_items: list[ReviewItem],
+    competence: str,
+) -> str:
+    # O isql continua após erros por padrão. BAIL impede que um erro de
+    # statement alcance o COMMIT e gere uma gravação parcial.
+    statements = ["SET BAIL ON;", "SET LIST ON;", "SET TRANSACTION;"]
+    added_professionals: set[tuple[str, str, str]] = set()
+    for item in insert_items + update_items:
+        professional_key = (item.professional_cns, item.cbo, item.cnes)
+        if professional_key not in added_professionals:
+            statements.append(professional_inserts(item))
+            added_professionals.add(professional_key)
+    for item in insert_items:
         statements.append(patient_insert(item)); statements.append(production_insert(item, competence))
+    statements.extend(production_update(item, competence) for item in update_items)
     statements.append("COMMIT;")
     statements.append("SET TRANSACTION READ ONLY;")
-    statements.extend(verification_select(item, competence, index) for index, item in enumerate(items, 1))
+    statements.extend(
+        verification_select(item, competence, index)
+        for index, item in enumerate(insert_items, 1)
+    )
+    statements.extend(
+        production_update_verification(item, competence, index)
+        for index, item in enumerate(update_items, 1)
+    )
     statements.extend(["ROLLBACK;", "QUIT;"])
-    sql = "\n".join(filter(None, statements)).rstrip() + "\n"
-    if re.search(r"\b(UPDATE|DELETE)\b", sql, re.I): raise AssertionError("SQL inseguro")
+    return "\n".join(filter(None, statements)).rstrip() + "\n"
+
+
+def build_insert_script(items: list[ReviewItem], competence: str) -> str:
+    sql = build_write_script(items, [], competence)
+    if re.search(r"\b(UPDATE|DELETE)\b", sql, re.I):
+        raise AssertionError("SQL inseguro")
     return sql

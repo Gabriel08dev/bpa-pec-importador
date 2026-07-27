@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title or 'Não foi possível importar' }}</title>
-  <link rel="stylesheet" href="/static/style.css?token={{ token }}">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="hero hero--compact"><div class="hero__inner"><div><p class="eyebrow">Ação interrompida com segurança</p><h1>{{ title or 'Não foi possível importar a planilha' }}</h1></div></div></header>
@@ -13,7 +13,11 @@
     <h2>O que aconteceu</h2>
     <p><strong>{{ message }}</strong></p>
     <p>{{ guidance or 'Revise a planilha e tente novamente. Nenhum registro foi enviado ao PEC ou gravado no BPA.' }}</p>
-    <a class="button secondary" href="{{ return_url or ('/?token=' ~ token) }}"><span aria-hidden="true">←</span> {{ return_label or 'Voltar ao início' }}</a>
+    <a class="button secondary" href="{{ return_url or '/' }}"><span aria-hidden="true">←</span> {{ return_label or 'Voltar ao início' }}</a>
   </main>
+  <footer class="system-footer">
+    <span class="system-footer__brand">BPA System &mdash; Desenvolvido por Gabriel da Silva Fonseca</span>
+    <form class="session-logout" method="post" action="/sair"><button type="submit">Sair</button></form>
+  </footer>
 </body>
 </html>

@@ -19,15 +19,29 @@ SET LIST ON;
 SET TRANSACTION READ ONLY;
 SELECT PRD_CNSMED AS PROFESSIONAL_CNS, PRD_UID AS CNES, PRD_CBO AS CBO, PRD_CMP AS COMPETENCE,
        PRD_DTATEN AS SERVICE_DATE, PRD_FLH AS SHEET_NO, PRD_SEQ AS SEQUENCE_NO,
-       PRD_CPF_PCNTE AS PATIENT_CPF, PRD_CNSPAC AS PATIENT_CNS
-FROM S_PRD WHERE PRD_CMP={literal(competence)} AND PRD_ORG='BPI' AND PRD_CNSMED IN ({values});
+       PRD_CPF_PCNTE AS PATIENT_CPF, PRD_CNSPAC AS PATIENT_CNS,
+       PRD_CID AS CID_VALUE, PRD_PA AS PROCEDURE_VALUE, PRD_ORG AS ORIGIN_VALUE
+FROM S_PRD WHERE PRD_CMP={literal(competence)} AND PRD_CNSMED IN ({values});
 ROLLBACK;
 QUIT;
 """
-        return [ExistingProduction(professional_cns=row.get("PROFESSIONAL_CNS", ""), cnes=row.get("CNES", ""), cbo=row.get("CBO", ""),
-                                   competence=row.get("COMPETENCE", ""), service_date=row.get("SERVICE_DATE", ""), sheet=row.get("SHEET_NO", ""),
-                                   sequence=row.get("SEQUENCE_NO", ""), patient_cpf=row.get("PATIENT_CPF", ""), patient_cns=row.get("PATIENT_CNS", ""))
-                for row in parse_list_output(self.runner.run(sql))]
+        return [
+            ExistingProduction(
+                professional_cns=row.get("PROFESSIONAL_CNS", ""),
+                cnes=row.get("CNES", ""),
+                cbo=row.get("CBO", ""),
+                competence=row.get("COMPETENCE", ""),
+                service_date=row.get("SERVICE_DATE", ""),
+                sheet=row.get("SHEET_NO", ""),
+                sequence=row.get("SEQUENCE_NO", ""),
+                patient_cpf=row.get("PATIENT_CPF", ""),
+                patient_cns=row.get("PATIENT_CNS", ""),
+                cid=row.get("CID_VALUE", ""),
+                procedure=row.get("PROCEDURE_VALUE", ""),
+                origin=row.get("ORIGIN_VALUE", ""),
+            )
+            for row in parse_list_output(self.runner.run(sql))
+        ]
 
     def validate_cids(self, cids: list[str]) -> set[str]:
         values = sorted(set(value for value in cids if value))
@@ -71,23 +85,6 @@ ORDER BY CASE WHEN C.CNS={literal(p.cns)} THEN 0 ELSE 1 END,
          CASE WHEN C.DTNASC={literal(p.birth_date)} THEN 0 ELSE 1 END, C.ID_CADCNS DESC;""")
         output = self.runner.run("SET LIST ON;\nSET TRANSACTION READ ONLY;\n" + "\n".join(statements) + "\nROLLBACK;\nQUIT;\n")
         return {int(row["ITEM_INDEX"]): row for row in parse_list_output(output) if row.get("ITEM_INDEX")}
-
-    def non_bpi_conflicts(self, items: list[ReviewItem]) -> list[int]:
-        statements = []
-        for index, item in enumerate(items, 1):
-            p = item.patient
-            identity = f"(P.PRD_CPF_PCNTE={literal(p.cpf)} OR P.PRD_CNSPAC={literal(p.cns)})"
-            statements.append(
-                f"SELECT COUNT(*) AS CONFLICT_{index} FROM S_PRD P "
-                f"WHERE P.PRD_CNSMED={literal(item.professional_cns)} "
-                f"AND P.PRD_DTATEN={literal(item.service_date)} AND {identity} "
-                "AND (P.PRD_ORG IS NULL OR P.PRD_ORG<>'BPI');"
-            )
-        output = self.runner.run("SET LIST ON;\nSET TRANSACTION READ ONLY;\n" + "\n".join(statements) + "\nROLLBACK;\nQUIT;\n")
-        values: dict[str, str] = {}
-        for row in parse_list_output(output):
-            values.update(row)
-        return [index for index in range(1, len(items) + 1) if int(values.get(f"CONFLICT_{index}", "0")) > 0]
 
     def manifest(self, competence: str, professional_cns: list[str]) -> dict:
         rows = self.existing_production(competence, professional_cns)

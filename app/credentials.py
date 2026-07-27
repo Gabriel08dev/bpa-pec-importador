@@ -33,7 +33,9 @@ def write_credential(target: str, username: str, password: str) -> None:
 def read_credential(target: str) -> tuple[str, str] | None:
     pointer = ctypes.POINTER(CREDENTIAL)()
     if not ctypes.windll.advapi32.CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(pointer)):
-        error = ctypes.get_last_error()
+        # windll não foi carregada com use_last_error=True; consulte o código
+        # nativo imediatamente para distinguir credencial ausente de falha real.
+        error = ctypes.windll.kernel32.GetLastError()
         if error == 1168:
             return None
         raise ctypes.WinError(error)

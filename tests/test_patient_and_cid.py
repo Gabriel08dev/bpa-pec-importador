@@ -4,7 +4,8 @@ import pytest
 
 from app.services.cid_service import normalize_cid, validate_cid
 from app.services.patient_service import (format_cpf, legacy_adjust, normalize_cpf, normalize_date,
-                                          normalize_pec_patient, valid_cns, valid_cpf)
+                                          normalize_pec_patient, reconcile_birth_date,
+                                          swapped_day_month_date, valid_cns, valid_cpf)
 from app.services.pec_service import _graphql_value, parse_pec_detail, parse_pec_graphql
 
 
@@ -34,6 +35,60 @@ def test_cns_valid(): assert valid_cns(_synthetic_valid_cns())
 def test_cns_invalid(): assert not valid_cns("700000000000000")
 def test_date_br(): assert normalize_date("03/07/2026") == "20260703"
 def test_date_compact(): assert normalize_date("20260703") == "20260703"
+
+
+@pytest.mark.parametrize("value", [45881, 45881.0, "45881", "45881.0"])
+def test_excel_serial_date(value):
+    assert normalize_date(value) == "20250812"
+
+
+def test_older_excel_serial_date():
+    assert normalize_date("23387") == "19640111"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("17021999", "19990217"),
+        ("1021996", "19960201"),
+        (1021996, "19960201"),
+        ("3012025", "20250103"),
+        ("8122025", "20251208"),
+        ("9022026", "20260209"),
+    ],
+)
+def test_compact_brazilian_date_from_numeric_cell(value, expected):
+    assert normalize_date(value) == expected
+
+
+def test_out_of_range_number_is_not_accepted_as_excel_date():
+    with pytest.raises(ValueError, match="Data inválida"):
+        normalize_date("99999")
+
+
+def test_swapped_day_month_date_only_returns_ambiguous_alternative():
+    assert swapped_day_month_date("19950501") == "19950105"
+    assert swapped_day_month_date("20250812") == "20251208"
+    assert swapped_day_month_date("20220524") == ""
+    assert swapped_day_month_date("20260606") == ""
+
+
+def test_reconcile_equal_birth_date_without_warning():
+    assert reconcile_birth_date("01/02/2000", "2000-02-01") == ("20000201", "")
+
+
+def test_reconcile_swapped_birth_date_uses_pec_with_warning():
+    confirmed, warning = reconcile_birth_date("19950501", "1995-01-05")
+    assert confirmed == "19950105"
+    assert "invertidos" in warning
+
+
+def test_reconcile_true_birth_divergence_uses_pec_after_exact_cpf_gate():
+    confirmed, warning = reconcile_birth_date("1974-07-25", "1974-07-26")
+    assert confirmed == "19740726"
+    assert "validação exata do CPF" in warning
+
+
 def test_cid_dot(): assert normalize_cid("Z71.3")[0] == "Z713"
 def test_cid_no_dot(): assert normalize_cid("Z713")[0] == "Z713"
 def test_cid_missing_in_table(): assert validate_cid("Z713", lambda _: False)[0] == ""

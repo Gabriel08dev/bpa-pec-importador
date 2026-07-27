@@ -15,6 +15,7 @@ class Settings:
     database: str = r"localhost:C:\Program Files (x86)\Datasus\BPA\BPAMAG.GDB"
     bpa_executable: Path = Path(r"C:\Program Files (x86)\Datasus\BPA\bpamag.exe")
     pec_url: str = "https://pec.exemplo.gov.br"
+    ceae_cnes: str = ""
     credential_firebird: str = "BPA_PEC_IMPORTADOR_FIREBIRD"
     credential_pec: str = "BPA_PEC_IMPORTADOR_PEC"
     outputs: Path = ROOT / "outputs"
@@ -31,16 +32,20 @@ class Settings:
         if not base.config_file.exists():
             return base
         raw = json.loads(base.config_file.read_text(encoding="utf-8"))
-        allowed = {"database", "bpa_executable", "pec_url"}
+        allowed = {"database", "bpa_executable", "pec_url", "ceae_cnes"}
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError("Configuração contém chaves não permitidas: " + ", ".join(sorted(unknown)))
         if any("senha" in key.lower() or "password" in key.lower() for key in raw):
             raise ValueError("Senhas não podem ser armazenadas no arquivo de configuração")
+        ceae_cnes = str(raw.get("ceae_cnes", "")).strip()
+        if ceae_cnes and (not ceae_cnes.isdigit() or len(ceae_cnes) != 7):
+            raise ValueError("CNES do CEAE deve conter exatamente 7 dígitos")
         return cls(
             database=str(raw.get("database", base.database)),
             bpa_executable=Path(raw.get("bpa_executable", base.bpa_executable)),
             pec_url=str(raw.get("pec_url", base.pec_url)).rstrip("/"),
+            ceae_cnes=ceae_cnes,
         )
 
     def prepare(self) -> None:
