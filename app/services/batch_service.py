@@ -214,6 +214,76 @@ class BatchService:
         updated["items"] = [item.to_dict() for item in items]
         return updated, resolved
 
+    def correct_item_cpf(
+        self,
+        batch_id: str,
+        row: int,
+        cpf: str = "",
+        *,
+        ignore: bool = False,
+    ) -> dict[str, Any]:
+        """Corrige o CPF ou ignora uma linha ainda não gravada no BPA."""
+        directory = self.reviews.batch_dir(batch_id)
+        if (directory / "resultado_gravacao.json").exists():
+            raise ValueError("Este lote já foi gravado e não pode mais ser alterado")
+        normalized_cpf = ""
+        if not ignore:
+            normalized_cpf = normalize_cpf(cpf)
+            if not valid_cpf(normalized_cpf):
+                raise ValueError("Informe um CPF válido com 11 dígitos")
+
+        filenames = (
+            "revisao_planilha.json",
+            "revisao_final.json",
+            "lote_revisado.json",
+        )
+        prepared: list[tuple[str, dict[str, Any]]] = []
+        found = False
+        for filename in filenames:
+            try:
+                payload = self.reviews.read(batch_id, filename)
+            except FileNotFoundError:
+                continue
+            self.reviews.verify_hash(payload)
+            items = [ReviewItem.from_dict(raw) for raw in payload.get("items", [])]
+            matches = [item for item in items if item.row == row]
+            if len(matches) != 1:
+                if matches:
+                    raise ValueError(f"Linha {row} não possui identificação única")
+                continue
+            found = True
+            item = matches[0]
+            if ignore:
+                item.status = Status.IGNORADO_PEC
+                item.reason = "Linha ignorada manualmente pelo operador antes da prévia."
+                item.sources["manual_review"] = "IGNORADO_PELO_OPERADOR"
+            else:
+                item.patient.cpf = normalized_cpf
+                item.original_identifier = normalized_cpf
+                item.sources["cpf"] = "CORRECAO_MANUAL"
+                warning = "CPF corrigido manualmente antes da prévia"
+                if warning not in item.warnings:
+                    item.warnings.append(warning)
+                if (
+                    item.status == Status.AGUARDANDO_CONFIRMACAO
+                    and "cpf" in item.reason.lower()
+                ):
+                    item.status = Status.REVISAO_INICIAL
+                    item.reason = ""
+            updated = dict(payload)
+            updated["items"] = [current.to_dict() for current in items]
+            prepared.append((filename, updated))
+
+        if not found:
+            raise ValueError(f"Linha {row} não encontrada no lote")
+        for filename, payload in prepared:
+            self.update_review(batch_id, payload, filename=filename)
+        (directory / "previa_firebird.json").unlink(missing_ok=True)
+        return {
+            "row": row,
+            "action": "IGNORED" if ignore else "CPF_CORRECTED",
+        }
+
     def import_cids_into_pec_batch(
         self,
         batch_id: str,

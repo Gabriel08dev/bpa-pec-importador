@@ -23,6 +23,7 @@ from app.services.batch_service import BatchService, validate_competence
 from app.services.dashboard_service import environment_summary, recent_batches
 from app.services.divergence_service import generate_ignored_csv, generate_pdf
 from app.services.firebird_workflow import FirebirdWorkflow
+from app.services.patient_service import valid_cpf
 from app.services.pec_service import PecService
 from app.services.professional_service import ProfessionalRegistry
 from app.services.spreadsheet_service import create_template
@@ -170,7 +171,61 @@ def batch_view(request: Request, batch_id: str):
     except FileNotFoundError: pass
     try: result = svc["reviews"].read(batch_id, "resultado_gravacao.json")
     except FileNotFoundError: pass
-    return templates.TemplateResponse(request, "batch.html", {"payload":payload,"preview":preview,"result":result})
+    invalid_cpf_rows = {
+        int(item.get("row", 0))
+        for item in payload.get("items", [])
+        if not valid_cpf(item.get("patient", {}).get("cpf", ""))
+    }
+    return templates.TemplateResponse(
+        request,
+        "batch.html",
+        {
+            "payload": payload,
+            "preview": preview,
+            "result": result,
+            "invalid_cpf_rows": invalid_cpf_rows,
+        },
+    )
+
+
+@router.post("/lote/{batch_id}/linha/{row}/cpf")
+def correct_batch_item_cpf(
+    request: Request,
+    batch_id: str,
+    row: int,
+    cpf: str = Form(""),
+    action: str = Form("correct"),
+):
+    svc = services(request)
+    ignore = action == "ignore"
+    try:
+        result = svc["batch"].correct_item_cpf(
+            batch_id,
+            row,
+            cpf,
+            ignore=ignore,
+        )
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Não foi possível alterar a linha",
+                "message": str(exc),
+                "guidance": (
+                    "Nenhum dado foi gravado no BPA. Confira o CPF ou volte ao lote."
+                ),
+                "return_url": f"/lote/{batch_id}",
+                "return_label": "Voltar ao lote",
+            },
+            status_code=400,
+        )
+    svc["audit"].record(
+        batch_id,
+        "BATCH_ITEM_MANUALLY_REVIEWED",
+        {"row": row, "action": result["action"]},
+    )
+    return RedirectResponse(f"/lote/{batch_id}", status_code=303)
 
 
 @router.post("/lote/{batch_id}/cids")

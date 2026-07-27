@@ -73,6 +73,37 @@ def test_batch_template_renders_items_list():
     assert "1 linhas" in html and "REVISAO_INICIAL" in html
 
 
+def test_batch_template_offers_cpf_correction_and_ignore_for_invalid_cpf():
+    payload = {
+        "batch_id": "LOTE-CPF",
+        "competence": "202607",
+        "items": [
+            {
+                "row": 7,
+                "patient": {"name": "Paciente sem CPF", "cpf": ""},
+                "professional_name": "Profissional Teste",
+                "service_date": "20260701",
+                "final_cid": "",
+                "status": "PEC_CONFIRMADO",
+                "reason": "",
+                "warnings": [],
+                "procedure": "0301010072",
+            }
+        ],
+    }
+    html = templates.env.get_template("batch.html").render(
+        token="token-test",
+        payload=payload,
+        preview=None,
+        result=None,
+        invalid_cpf_rows={7},
+    )
+
+    assert "/lote/LOTE-CPF/linha/7/cpf" in html
+    assert "Corrigir CPF" in html
+    assert "Ignorar linha" in html
+
+
 def test_home_offers_pec_attendance_search_without_spreadsheet():
     html=templates.env.get_template("index.html").render(
         token="token-test",

@@ -81,7 +81,7 @@
       <div class="section-heading"><div class="heading-with-step"><span class="step-number">2</span><div><h2>Revisão dos atendimentos</h2><p>Confira o paciente localizado, profissional, data, CID e situação de cada linha.</p></div></div></div>
       <div class="table-shell">
         <table>
-          <thead><tr><th>Linha</th><th>Paciente PEC</th><th>Profissional</th><th>Data</th><th>CID</th><th>Status</th><th>Motivo ou aviso</th></tr></thead>
+          <thead><tr><th>Linha</th><th>Paciente PEC</th><th>Profissional</th><th>Data</th><th>CID</th><th>Status</th><th>Motivo ou aviso</th><th>Ações</th></tr></thead>
           <tbody>
             {% for item in payload["items"] %}
             <tr>
@@ -92,6 +92,23 @@
               <td class="cell-nowrap">{{ item.final_cid or '—' }}</td>
               <td><span class="status" data-status="{{ item.status }}">{{ item.status }}</span></td>
               <td class="cell-muted">{{ item.reason }} {{ item.warnings|join('; ') }}</td>
+              <td class="review-actions">
+                {% if item.row in invalid_cpf_rows and not result %}
+                <form class="cpf-correction-form" method="post" action="/lote/{{ payload.batch_id }}/linha/{{ item.row }}/cpf">
+                  <label>
+                    <span class="sr-only">CPF correto da linha {{ item.row }}</span>
+                    <input name="cpf" inputmode="numeric" maxlength="14" placeholder="CPF correto" aria-label="CPF correto da linha {{ item.row }}" required>
+                  </label>
+                  <button type="submit">Corrigir CPF</button>
+                </form>
+                <form method="post" action="/lote/{{ payload.batch_id }}/linha/{{ item.row }}/cpf">
+                  <input type="hidden" name="action" value="ignore">
+                  <button class="secondary compact-button" type="submit">Ignorar linha</button>
+                </form>
+                {% else %}
+                <span class="cell-muted">—</span>
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>

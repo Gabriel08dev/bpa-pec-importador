@@ -196,6 +196,52 @@ def test_newly_registered_professional_can_be_resolved_in_existing_batch(tmp_pat
     assert updated["items"][0]["sources"]["professional"] == "PEC_LISTA_ATENDIMENTOS"
 
 
+def test_operator_can_correct_missing_cpf_or_ignore_line_before_preview(tmp_path):
+    root = Path(__file__).parents[1]
+    reviews = ReviewRepository(tmp_path / "outputs")
+    service = BatchService(
+        ProfessionalRegistry(root / "data" / "profissionais.example.json"),
+        reviews,
+    )
+    records = [
+        {
+            "name": "Paciente sem CPF",
+            "cpf": "",
+            "cns": "700000000000006",
+            "birth_date": "01/02/2000",
+            "service_date": "20260720",
+            "professional": "Ana Profissional Exemplo",
+        },
+        {
+            "name": "Outro paciente sem CPF",
+            "cpf": "",
+            "cns": "700000000000014",
+            "birth_date": "01/02/2001",
+            "service_date": "20260720",
+            "professional": "Bruno Profissional Exemplo",
+        },
+    ]
+    batch_id, payload = service.import_pec_attendances(
+        records, "202607", "2026-07-01", "2026-07-31"
+    )
+    final = dict(payload)
+    final["items"] = [
+        dict(item, status="PEC_CONFIRMADO") for item in payload["items"]
+    ]
+    service.update_review(batch_id, final)
+
+    corrected = service.correct_item_cpf(batch_id, 1, "529.982.247-25")
+    ignored = service.correct_item_cpf(batch_id, 2, ignore=True)
+    updated = reviews.read(batch_id, "revisao_final.json")
+
+    assert corrected == {"row": 1, "action": "CPF_CORRECTED"}
+    assert ignored == {"row": 2, "action": "IGNORED"}
+    assert updated["items"][0]["patient"]["cpf"] == "52998224725"
+    assert updated["items"][0]["sources"]["cpf"] == "CORRECAO_MANUAL"
+    assert updated["items"][1]["status"] == "IGNORADO_PEC"
+    assert "manualmente" in updated["items"][1]["reason"]
+
+
 def test_cids_are_crossed_by_cpf_date_and_professional_without_mixing_visits(tmp_path):
     root=Path(__file__).parents[1]
     reviews=ReviewRepository(tmp_path/"outputs")

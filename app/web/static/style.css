@@ -1087,6 +1087,46 @@ body.error #message { background: var(--danger-soft); color: var(--danger); }
   align-self: end;
 }
 
+.review-actions {
+  min-width: 270px;
+}
+
+.cpf-correction-form {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) auto;
+  gap: 7px;
+  margin-bottom: 7px;
+}
+
+.cpf-correction-form input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  font-size: .8rem;
+}
+
+.cpf-correction-form button {
+  min-height: 36px;
+  padding: 7px 11px;
+  white-space: nowrap;
+}
+
+.review-actions form:last-of-type {
+  display: inline-block;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (max-width: 900px) {
   .dashboard-grid { grid-template-columns: 1fr; }
   .environment-panel { align-items: flex-start; }
