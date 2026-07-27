@@ -156,6 +156,46 @@ def test_pec_list_source_manifest_detects_change(tmp_path):
     assert not BatchService.source_unchanged(payload)
 
 
+def test_newly_registered_professional_can_be_resolved_in_existing_batch(tmp_path):
+    root = Path(__file__).parents[1]
+    service = BatchService(
+        ProfessionalRegistry(root / "data" / "profissionais.example.json"),
+        ReviewRepository(tmp_path / "outputs"),
+    )
+    payload = {
+        "origin": "PEC_LISTA_ATENDIMENTOS",
+        "items": [
+            {
+                "row": 1,
+                "original_identifier": "52998224725",
+                "professional_name": "Ana Profissional Exemplo",
+                "professional_cns": "",
+                "cbo": "",
+                "cnes": "",
+                "procedure": "",
+                "service_date": "20260720",
+                "informed_birth": "20000101",
+                "original_cid": "",
+                "patient": {"cpf": "52998224725", "birth_date": "20000101"},
+                "status": "AGUARDANDO_CONFIRMACAO",
+                "reason": (
+                    "Profissional não identificado com segurança: "
+                    "Ana Profissional Exemplo"
+                ),
+                "sources": {"pec_lookup": "PEC_LISTA_ATENDIMENTOS"},
+            }
+        ],
+    }
+
+    updated, resolved = service.resolve_newly_registered_professionals(payload)
+
+    assert resolved == 1
+    assert updated["items"][0]["professional_cns"] == "700000000000005"
+    assert updated["items"][0]["status"] == "REVISAO_INICIAL"
+    assert updated["items"][0]["reason"] == ""
+    assert updated["items"][0]["sources"]["professional"] == "PEC_LISTA_ATENDIMENTOS"
+
+
 def test_cids_are_crossed_by_cpf_date_and_professional_without_mixing_visits(tmp_path):
     root=Path(__file__).parents[1]
     reviews=ReviewRepository(tmp_path/"outputs")

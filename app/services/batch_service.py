@@ -176,6 +176,44 @@ class BatchService:
         self.reviews.write(batch_id, "revisao_planilha.json", payload)
         return batch_id, payload
 
+    def resolve_newly_registered_professionals(
+        self, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], int]:
+        """Reavalia somente linhas antes barradas por profissional desconhecido."""
+        items = [ReviewItem.from_dict(raw) for raw in payload.get("items", [])]
+        resolved = 0
+        unknown_reason = "Profissional não identificado com segurança:"
+        for item in items:
+            if (
+                item.professional_cns
+                or item.status != Status.AGUARDANDO_CONFIRMACAO
+                or not item.reason.startswith(unknown_reason)
+            ):
+                continue
+            try:
+                professional = self.professionals.match_name(item.professional_name)
+            except ValueError:
+                continue
+            item.professional_name = professional.name
+            item.professional_cns = professional.cns
+            item.cbo = professional.cbo
+            item.cnes = professional.cnes
+            item.procedure = professional.procedure
+            item.create_professional_if_missing = professional.create_if_missing
+            item.status = Status.REVISAO_INICIAL
+            item.reason = ""
+            item.sources["professional"] = (
+                "PEC_LISTA_ATENDIMENTOS"
+                if payload.get("origin") == "PEC_LISTA_ATENDIMENTOS"
+                else "LISTA_CEAE"
+            )
+            resolved += 1
+        if not resolved:
+            return payload, 0
+        updated = dict(payload)
+        updated["items"] = [item.to_dict() for item in items]
+        return updated, resolved
+
     def import_cids_into_pec_batch(
         self,
         batch_id: str,

@@ -245,6 +245,15 @@ def consult_pec(request: Request, batch_id: str):
     def action(progress):
         payload = svc["reviews"].read(batch_id, "revisao_planilha.json")
         svc["reviews"].verify_hash(payload)
+        payload, resolved_professionals = (
+            svc["batch"].resolve_newly_registered_professionals(payload)
+        )
+        if resolved_professionals:
+            payload = svc["batch"].update_review(
+                batch_id,
+                payload,
+                filename="revisao_planilha.json",
+            )
         items = [ReviewItem.from_dict(item) for item in payload["items"]]
         # A planilha (ou o lote descoberto) define os atendimentos. Aqui o PEC
         # é usado somente para completar/confirmar a identidade cadastral.
@@ -255,7 +264,14 @@ def consult_pec(request: Request, batch_id: str):
         payload["items"] = [item.to_dict() for item in items]
         updated = svc["batch"].update_review(batch_id, payload)
         svc["reviews"].write(batch_id, "lote_revisado.json", updated)
-        svc["audit"].record(batch_id, "PEC_CONSULTED", {"items":len(items)})
+        svc["audit"].record(
+            batch_id,
+            "PEC_CONSULTED",
+            {
+                "items": len(items),
+                "newly_registered_professionals": resolved_professionals,
+            },
+        )
         return {"redirect":f"/lote/{batch_id}"}
     job = start_job("Consultando o PEC", action)
     return RedirectResponse(f"/trabalho/{job}", status_code=303)
