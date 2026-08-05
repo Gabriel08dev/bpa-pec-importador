@@ -183,6 +183,15 @@ class BatchService:
         items = [ReviewItem.from_dict(raw) for raw in payload.get("items", [])]
         resolved = 0
         unknown_reason = "Profissional não identificado com segurança:"
+        pec_origin = payload.get("origin") == "PEC_LISTA_ATENDIMENTOS"
+        seen = {
+            (item.patient.cpf, item.professional_cns, item.service_date)
+            for item in items
+            if item.professional_cns
+            and item.patient.cpf
+            and item.service_date
+            and item.status != Status.IGNORADO_DUPLICIDADE
+        }
         for item in items:
             if (
                 item.professional_cns
@@ -200,13 +209,49 @@ class BatchService:
             item.cnes = professional.cnes
             item.procedure = professional.procedure
             item.create_professional_if_missing = professional.create_if_missing
+
+            # Na importação da planilha, o profissional é validado antes dos
+            # demais campos. Se ele ainda não estava cadastrado, CPF, datas e CID
+            # permaneceram no formato bruto. Normalize-os agora para que a linha
+            # possa de fato prosseguir para a consulta no PEC.
+            if not pec_origin:
+                try:
+                    item.service_date = normalize_date(item.service_date)
+                    item.informed_birth = normalize_date(item.informed_birth)
+                    item.original_identifier = normalize_cpf(item.original_identifier)
+                    item.patient.cpf = item.original_identifier
+                    item.patient.birth_date = item.informed_birth
+                    item.final_cid, warning = normalize_cid(item.original_cid)
+                    if warning and warning not in item.warnings:
+                        item.warnings.append(warning)
+                    item.sources.update(
+                        {
+                            "cpf": "PLANILHA",
+                            "birth_date": "PLANILHA",
+                            "service_date": "PLANILHA",
+                            "competence": str(payload.get("competence", "")),
+                        }
+                    )
+                except ValueError as exc:
+                    item.reason = str(exc)
+                    continue
+
             item.status = Status.REVISAO_INICIAL
             item.reason = ""
             item.sources["professional"] = (
                 "PEC_LISTA_ATENDIMENTOS"
-                if payload.get("origin") == "PEC_LISTA_ATENDIMENTOS"
+                if pec_origin
                 else "LISTA_CEAE"
             )
+            key = (item.patient.cpf, item.professional_cns, item.service_date)
+            if all(key) and key in seen:
+                item.status = Status.IGNORADO_DUPLICIDADE
+                item.reason = (
+                    "Duplicidade real: mesmo paciente, profissional e data; "
+                    "não será incluído novamente."
+                )
+            elif all(key):
+                seen.add(key)
             resolved += 1
         if not resolved:
             return payload, 0

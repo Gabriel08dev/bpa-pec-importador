@@ -196,6 +196,51 @@ def test_newly_registered_professional_can_be_resolved_in_existing_batch(tmp_pat
     assert updated["items"][0]["sources"]["professional"] == "PEC_LISTA_ATENDIMENTOS"
 
 
+def test_newly_registered_spreadsheet_professional_resumes_field_normalization(tmp_path):
+    root = Path(__file__).parents[1]
+    service = BatchService(
+        ProfessionalRegistry(root / "data" / "profissionais.example.json"),
+        ReviewRepository(tmp_path / "outputs"),
+    )
+    payload = {
+        "origin": str(tmp_path / "atendimentos.xlsx"),
+        "competence": "202607",
+        "items": [
+            {
+                "row": 5,
+                "original_identifier": "529.982.247-25",
+                "professional_name": "Ana Profissional Exemplo",
+                "professional_cns": "",
+                "cbo": "",
+                "cnes": "",
+                "procedure": "",
+                "service_date": "20/07/2026",
+                "informed_birth": "01/02/2000",
+                "original_cid": "I.10",
+                "patient": {},
+                "status": "AGUARDANDO_CONFIRMACAO",
+                "reason": (
+                    "Profissional não identificado com segurança: "
+                    "Ana Profissional Exemplo"
+                ),
+                "sources": {},
+            }
+        ],
+    }
+
+    updated, resolved = service.resolve_newly_registered_professionals(payload)
+
+    item = updated["items"][0]
+    assert resolved == 1
+    assert item["professional_cns"] == "700000000000005"
+    assert item["patient"]["cpf"] == "52998224725"
+    assert item["patient"]["birth_date"] == "20000201"
+    assert item["service_date"] == "20260720"
+    assert item["final_cid"] == "I10"
+    assert item["status"] == "REVISAO_INICIAL"
+    assert item["sources"]["professional"] == "LISTA_CEAE"
+
+
 def test_operator_can_correct_missing_cpf_or_ignore_line_before_preview(tmp_path):
     root = Path(__file__).parents[1]
     reviews = ReviewRepository(tmp_path / "outputs")
