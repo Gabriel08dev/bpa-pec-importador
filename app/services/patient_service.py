@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from app.models import Patient
@@ -51,12 +51,125 @@ def normalize_date(value: Any) -> str:
     if isinstance(value, date):
         return value.strftime("%Y%m%d")
     text = str(value).strip()
-    for pattern in ("%d/%m/%Y", "%Y-%m-%d", "%Y%m%d", "%d-%m-%Y"):
+    # Algumas planilhas exibem anos com dois algarismos e podem acrescentar
+    # uma observação entre parênteses ao valor exportado. Converta esse formato
+    # explicitamente para evitar depender da interpretação regional do Excel.
+    short_br = re.fullmatch(
+        r"(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?:\s*\(.*)?",
+        text,
+    )
+    if short_br:
+        day, month, raw_year = short_br.groups()
+        year = int(raw_year)
+        if len(raw_year) == 2:
+            year += 2000 if year <= 68 else 1900
+        try:
+            return datetime(year, int(month), int(day)).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    # Algumas exportações removem somente a barra entre mês e ano
+    # (ex.: 16/092026). A largura fixa torna a recuperação inequívoca.
+    missing_year_separator = re.fullmatch(r"(\d{1,2})/(\d{2})(\d{4})", text)
+    if missing_year_separator:
+        day, month, year = missing_year_separator.groups()
+        try:
+            return datetime(int(year), int(month), int(day)).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    for pattern in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             return datetime.strptime(text, pattern).strftime("%Y%m%d")
         except ValueError:
             pass
+    # AAAAMMDD só é aceito quando os oito algarismos realmente começam por
+    # um ano plausível. O strptime aceita alguns valores de sete algarismos
+    # com largura variável (ex.: 3012025), interpretando-os incorretamente
+    # como ano 3012 em vez de 03/01/2025.
+    if text.isdigit() and len(text) == 8 and 1900 <= int(text[:4]) <= 2100:
+        try:
+            return datetime.strptime(text, "%Y%m%d").strftime("%Y%m%d")
+        except ValueError:
+            pass
+    # Células/fórmulas sem formatação também podem chegar como DDMMAAAA.
+    # Quando o dia começa com zero, a conversão numérica remove esse zero
+    # (ex.: 01/02/1996 vira 1021996), por isso o preenchimento à esquerda.
+    if text.isdigit() and len(text) in {7, 8}:
+        compact_br = text.zfill(8)
+        try:
+            return datetime.strptime(compact_br, "%d%m%Y").strftime("%Y%m%d")
+        except ValueError:
+            pass
+    # Arquivos exportados pelo Google Planilhas/Excel podem entregar uma
+    # data como o número serial interno (ex.: 45881 = 12/08/2025).
+    # O intervalo limita a conversão a datas plausíveis e impede confundir
+    # identificadores numéricos com datas.
+    try:
+        serial = float(text.replace(",", "."))
+        if serial.is_integer() and 1 <= serial <= 73415:
+            converted = datetime(1899, 12, 30) + timedelta(days=int(serial))
+            return converted.strftime("%Y%m%d")
+    except ValueError:
+        pass
     raise ValueError(f"Data inválida: {text}")
+
+
+def normalize_service_date(value: Any, competence: str) -> tuple[str, str]:
+    """Normaliza atendimento e usa a competência para desfazer dia/mês trocados."""
+    normalized = normalize_date(value)
+    if len(competence) != 6 or not competence.isdigit():
+        raise ValueError("Competência inválida ao conferir a data do atendimento")
+    if normalized[:6] == competence:
+        return normalized, ""
+    swapped = swapped_day_month_date(normalized)
+    if swapped and swapped[:6] == competence:
+        return (
+            swapped,
+            "Dia e mês do atendimento vieram invertidos no arquivo exportado; "
+            "data ajustada pela competência",
+        )
+    raise ValueError(
+        "Data do atendimento fora da competência: "
+        f"{normalized[6:8]}/{normalized[4:6]}/{normalized[:4]}"
+    )
+
+
+def reconcile_birth_date(informed: Any, returned_by_pec: Any) -> tuple[str, str]:
+    """Confirma a data do PEC após o CPF exato já ter sido validado.
+
+    Retorna a data canônica que deve seguir no lote e um aviso auditável.
+    A função não decide identidade: o chamador precisa bloquear previamente
+    qualquer CPF divergente.
+    """
+    informed_date = normalize_date(informed)
+    pec_date = normalize_date(returned_by_pec)
+    if informed_date == pec_date:
+        return pec_date, ""
+    if swapped_day_month_date(informed_date) == pec_date:
+        return (
+            pec_date,
+            "Dia e mês do nascimento vieram invertidos no arquivo exportado; "
+            "data confirmada pelo PEC",
+        )
+    return (
+        pec_date,
+        "Nascimento da planilha diverge do cadastro; data confirmada pelo PEC "
+        "após validação exata do CPF",
+    )
+
+
+def swapped_day_month_date(value: Any) -> str:
+    """Retorna a alternativa dia/mês apenas quando a data é ambígua.
+
+    Alguns arquivos exportados pelo Google Planilhas exibem ``dd/mm/aaaa``,
+    mas gravam internamente a data interpretada como ``mm/dd/aaaa``.
+    """
+    normalized = normalize_date(value)
+    if not normalized:
+        return ""
+    year, month, day = normalized[:4], normalized[4:6], normalized[6:8]
+    if day == month or int(day) > 12:
+        return ""
+    return f"{year}{day}{month}"
 
 
 def canonical(value: Any) -> str:

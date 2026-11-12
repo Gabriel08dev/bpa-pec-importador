@@ -26,3 +26,12 @@ def test_professional_name_variations(name): assert REGISTRY.match_name(name).cn
 
 
 def test_professional_is_found_by_cns_despite_name(): assert REGISTRY.by_cns("700000000000005").name.startswith("Ana")
+
+
+def test_forced_ceae_cnes_overrides_every_professional_and_allows_binding_creation():
+    registry = ProfessionalRegistry(
+        Path(__file__).parents[1] / "data" / "profissionais.example.json",
+        "4998782",
+    )
+    assert {item.cnes for item in registry.items} == {"4998782"}
+    assert all(item.create_if_missing for item in registry.items)

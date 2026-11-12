@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Lote {{ payload.batch_id }}</title>
-  <link rel="stylesheet" href="/static/style.css?token={{ token }}">
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="hero hero--compact">
@@ -15,22 +15,82 @@
   </header>
 
   <main class="layout layout--wide">
-    <nav class="topbar" aria-label="Navegação"><a class="button secondary" href="/?token={{ token }}"><span aria-hidden="true">←</span> Voltar ao início</a></nav>
+    <nav class="topbar" aria-label="Navegação"><a class="button secondary" href="/"><span aria-hidden="true">←</span> Voltar ao início</a></nav>
 
     <section class="card">
-      <div class="section-heading"><div class="heading-with-step"><span class="step-number">1</span><div><h2>Fluxo do lote</h2><p>Execute as etapas na ordem: consulta, relatório e prévia.</p></div></div></div>
+      <div class="section-heading"><div class="heading-with-step"><span class="step-number">1</span><div><h2>Fluxo do lote</h2><p>Consulte o PEC, cruze os CIDs quando necessário, gere o relatório e só então prepare a prévia.</p></div></div></div>
       <div class="flow-actions">
-        <form method="post" action="/lote/{{ payload.batch_id }}/pec?token={{ token }}"><button type="submit">Consultar todos no PEC</button></form>
-        <form method="post" action="/lote/{{ payload.batch_id }}/relatorio?token={{ token }}"><button class="secondary" type="submit">Gerar relatório de divergências</button></form>
-        <form method="post" action="/lote/{{ payload.batch_id }}/previa?token={{ token }}"><button type="submit">Gerar lote final e prévia Firebird</button></form>
+        <form method="post" action="/lote/{{ payload.batch_id }}/pec"><button type="submit">{% if pec_retry_count|default(0) %}Retomar consulta no PEC{% else %}Consultar todos no PEC{% endif %}</button></form>
+        <form method="post" action="/lote/{{ payload.batch_id }}/relatorio"><button class="secondary" type="submit">Gerar relatório de divergências</button></form>
+        <form method="post" action="/lote/{{ payload.batch_id }}/previa"><button type="submit">Gerar lote final e prévia Firebird</button></form>
       </div>
     </section>
 
+    {% if payload.origin == "PEC_LISTA_ATENDIMENTOS" and not result %}
+    <section class="card cid-cross-card">
+      <div class="section-heading">
+        <div class="heading-with-step">
+          <span class="step-number">CID</span>
+          <div>
+            <h2>Trazer CIDs da planilha</h2>
+            <p>O cruzamento exige correspondência exata de CPF, data do atendimento e profissional.</p>
+          </div>
+        </div>
+      </div>
+      <form class="cid-cross-form" method="post" action="/lote/{{ payload.batch_id }}/cids" enctype="multipart/form-data">
+        <label class="field">Planilha com os CIDs preenchidos
+          <input type="file" name="file" accept=".xlsx,.csv,.tsv" required>
+          <small>Pode ser a mesma planilha modelo. A data de nascimento não é usada neste cruzamento.</small>
+        </label>
+        <button type="submit">Cruzar e importar CIDs</button>
+      </form>
+      <div class="cid-cross-rule" role="note">
+        <strong>Regra de segurança</strong>
+        <span>Mesmo CPF com outro médico ou em outro dia é outro atendimento. Linhas sem correspondência, com CID inválido ou com CIDs conflitantes não recebem CID.</span>
+      </div>
+
+      {% if payload.cid_import_summary %}
+      {% set cid_summary = payload.cid_import_summary %}
+      <div class="cid-match-result" aria-live="polite">
+        <h3>Resultado do último cruzamento</h3>
+        <div class="progress-summary cid-match-summary">
+          <div><small>Chaves encontradas</small><strong>{{ cid_summary.matched_keys }}</strong></div>
+          <div><small>Linhas atualizadas</small><strong>{{ cid_summary.matched_items }}</strong></div>
+          <div><small>Atendimentos sem CID</small><strong>{{ cid_summary.attendances_without_cid }}</strong></div>
+          <div><small>Linhas inválidas</small><strong>{{ cid_summary.invalid_rows|length }}</strong></div>
+        </div>
+        {% if cid_summary.unmatched_spreadsheet_rows %}
+        <p class="field-message field-message--warning">Sem correspondência no lote: linhas {{ cid_summary.unmatched_spreadsheet_rows|join(", ") }}.</p>
+        {% endif %}
+        {% if cid_summary.conflict_rows %}
+        <p class="field-message">CIDs conflitantes para a mesma chave: linhas {{ cid_summary.conflict_rows|join(", ") }}.</p>
+        {% endif %}
+        {% if cid_summary.invalid_rows %}
+        <ul class="cid-issue-list">
+          {% for issue in cid_summary.invalid_rows %}
+          <li>Linha {{ issue.row }}: {{ issue.reason }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% endif %}
+    </section>
+    {% endif %}
+
     <section class="card">
-      <div class="section-heading"><div class="heading-with-step"><span class="step-number">2</span><div><h2>Revisão dos atendimentos</h2><p>Confira o paciente localizado, profissional, data, CID e situação de cada linha.</p></div></div></div>
+      {% set address_rows = missing_address_rows|default([]) %}
+      <div class="section-heading review-heading">
+        <div class="heading-with-step"><span class="step-number">2</span><div><h2>Revisão dos atendimentos</h2><p>Confira o paciente localizado, profissional, data, CID e situação de cada linha.</p></div></div>
+        {% if address_rows and not result %}
+        <form method="post" action="/lote/{{ payload.batch_id }}/ignorar-sem-endereco">
+          <input type="hidden" name="review_sha256" value="{{ payload.review_sha256 }}">
+          <button class="secondary" type="submit">Ignorar linhas sem endereço ({{ address_rows|length }})</button>
+        </form>
+        {% endif %}
+      </div>
       <div class="table-shell">
         <table>
-          <thead><tr><th>Linha</th><th>Paciente PEC</th><th>Profissional</th><th>Data</th><th>CID</th><th>Status</th><th>Motivo ou aviso</th></tr></thead>
+          <thead><tr><th>Linha</th><th>Paciente PEC</th><th>Profissional</th><th>Data</th><th>CID</th><th>Status</th><th>Motivo ou aviso</th><th>Ações</th></tr></thead>
           <tbody>
             {% for item in payload["items"] %}
             <tr>
@@ -40,7 +100,27 @@
               <td class="cell-nowrap">{{ item.service_date }}</td>
               <td class="cell-nowrap">{{ item.final_cid or '—' }}</td>
               <td><span class="status" data-status="{{ item.status }}">{{ item.status }}</span></td>
-              <td class="cell-muted">{{ item.reason }} {{ item.warnings|join('; ') }}</td>
+              <td class="cell-muted">
+                {% if item.row in address_rows %}<strong class="field-message--warning">Adicionar endereço.</strong>{% endif %}
+                {{ item.reason }} {{ item.warnings|join('; ') }}
+              </td>
+              <td class="review-actions">
+                {% if item.row in invalid_cpf_rows and not result %}
+                <form class="cpf-correction-form" method="post" action="/lote/{{ payload.batch_id }}/linha/{{ item.row }}/cpf">
+                  <label>
+                    <span class="sr-only">CPF correto da linha {{ item.row }}</span>
+                    <input name="cpf" inputmode="numeric" maxlength="14" placeholder="CPF correto" aria-label="CPF correto da linha {{ item.row }}" required>
+                  </label>
+                  <button type="submit">Corrigir CPF</button>
+                </form>
+                <form method="post" action="/lote/{{ payload.batch_id }}/linha/{{ item.row }}/cpf">
+                  <input type="hidden" name="action" value="ignore">
+                  <button class="secondary compact-button" type="submit">Ignorar linha</button>
+                </form>
+                {% else %}
+                <span class="cell-muted">—</span>
+                {% endif %}
+              </td>
             </tr>
             {% endfor %}
           </tbody>
@@ -50,23 +130,23 @@
 
     {% if preview %}
     <section class="card notice">
-      <div class="section-heading"><div class="heading-with-step"><span class="step-number">3</span><div><h2>Prévia de inclusão</h2><p>Revise competência, profissional, data, folha e sequência. A gravação recalcula tudo sobre o banco ativo.</p></div></div></div>
+      <div class="section-heading"><div class="heading-with-step"><span class="step-number">3</span><div><h2>Prévia de gravação</h2><p>Revise inclusões novas, CIDs ausentes e correções para o CNES do CEAE. A gravação recalcula tudo sobre o banco ativo.</p></div></div></div>
       <div class="table-shell">
         <table>
-          <thead><tr><th>Linha</th><th>Profissional</th><th>Data</th><th>Folha</th><th>Seq.</th><th>Procedimento</th><th>Status</th></tr></thead>
+          <thead><tr><th>Linha</th><th>Profissional</th><th>CNES destino</th><th>Data</th><th>Folha</th><th>Seq.</th><th>Procedimento</th><th>CID</th><th>Status</th></tr></thead>
           <tbody>
             {% for item in preview["items"] %}
-            <tr><td>{{ item.row }}</td><td>{{ item.professional_name }}</td><td class="cell-nowrap">{{ item.service_date }}</td><td>{{ item.sheet }}</td><td>{{ item.sequence }}</td><td class="cell-nowrap">{{ item.procedure }}</td><td><span class="status" data-status="{{ item.status }}">{{ item.status }}</span></td></tr>
+            <tr><td>{{ item.row }}</td><td>{{ item.professional_name }}</td><td class="cell-nowrap">{{ item.cnes }}</td><td class="cell-nowrap">{{ item.service_date }}</td><td>{{ item.sheet }}</td><td>{{ item.sequence }}</td><td class="cell-nowrap">{{ item.procedure }}</td><td class="cell-nowrap">{{ item.final_cid or '—' }}</td><td><span class="status" data-status="{{ item.status }}">{{ item.status }}</span></td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
-      <form class="danger-zone" method="post" action="/lote/{{ payload.batch_id }}/gravar?token={{ token }}">
+      <form class="danger-zone" method="post" action="/lote/{{ payload.batch_id }}/gravar">
         <label class="field">Confirmação textual
           <input name="confirmation" placeholder="ADICIONAR" autocomplete="off" required>
           <small>Digite exatamente ADICIONAR somente após conferir a prévia.</small>
         </label>
-        <button class="danger" type="submit">Criar backup e adicionar somente novos</button>
+        <button class="danger" type="submit">Criar backup, corrigir CNES, completar CIDs e adicionar novos</button>
       </form>
     </section>
     {% endif %}
@@ -74,11 +154,15 @@
     {% if result %}
     <section class="card success">
       <div class="section-heading"><div><h2>Resultado da verificação</h2><p>Conferência realizada após a gravação.</p></div></div>
-      <div class="result-line"><span class="result-mark" aria-hidden="true">✓</span><strong>{{ result.status }} · {{ result.inserted }}/{{ result.expected }} verificados.</strong></div>
+      <div class="result-line"><span class="result-mark" aria-hidden="true">✓</span><strong>{{ result.status }} · {{ result.verified|default(result.inserted) }}/{{ result.expected }} operações verificadas.</strong></div>
+      <p>{{ result.inserted }} atendimento(s) novo(s) incluído(s) · {{ result.corrected_cnes|default(0) }} registro(s) corrigido(s) para o CNES do CEAE · {{ result.updated_cids|default(0) }} CID(s) ausente(s) completado(s).</p>
       {% if result.failures %}<ul>{% for failure in result.failures %}<li>{{ failure }}</li>{% endfor %}</ul>{% endif %}
       <p>Próximo passo: abra o BPA Magnético, execute a consistência e exporte a remessa pelo próprio BPA.</p>
     </section>
     {% endif %}
   </main>
+  <footer class="system-footer">
+    <span class="system-footer__brand">BPA System &mdash; Desenvolvido por Gabriel da Silva Fonseca</span>
+  </footer>
 </body>
 </html>

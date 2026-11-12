@@ -27,6 +27,7 @@ HEADERS = {
     "CID": "cid",
 }
 REQUIRED = {"professional", "service_date", "cpf", "birth_date"}
+CID_REQUIRED = {"professional", "service_date", "cpf", "cid"}
 
 
 def sha256_file(path: Path) -> str:
@@ -49,7 +50,7 @@ def _text(value: Any) -> str:
     return str(value).strip()
 
 
-def read_rows(path: Path) -> list[dict[str, Any]]:
+def _read_rows(path: Path, required: set[str]) -> list[dict[str, Any]]:
     suffix = path.suffix.lower()
     worksheets: list[list[list[Any]]]
     if suffix == ".xlsx":
@@ -84,7 +85,7 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
             found = set(candidate_mapping.values())
             if len(found) > len(best_found):
                 best_found = found
-            if REQUIRED <= found:
+            if required <= found:
                 raw_rows = candidate_rows
                 header_index = candidate_index
                 mapped = candidate_mapping
@@ -92,7 +93,7 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
         if header_index >= 0:
             break
     if header_index < 0:
-        missing = REQUIRED - best_found
+        missing = required - best_found
         raise ValueError(
             "Não foi possível localizar a linha de cabeçalho nas primeiras 50 linhas. "
             "Colunas obrigatórias ausentes: " + ", ".join(sorted(missing))
@@ -104,6 +105,15 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
             item["row"] = row_number
             rows.append(item)
     return rows
+
+
+def read_rows(path: Path) -> list[dict[str, Any]]:
+    return _read_rows(path, REQUIRED)
+
+
+def read_cid_rows(path: Path) -> list[dict[str, Any]]:
+    """Lê uma planilha usada apenas para cruzar CID com um lote vindo do PEC."""
+    return _read_rows(path, CID_REQUIRED)
 
 
 def create_template(path: Path, professional_names: list[str]) -> Path:

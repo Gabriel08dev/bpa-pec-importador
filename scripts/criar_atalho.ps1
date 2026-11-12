@@ -13,4 +13,5 @@ $shortcut.WorkingDirectory = $project
 $shortcut.Description = 'Importador local CEAE - PEC e BPA'
 $shortcut.IconLocation = 'C:\Windows\System32\imageres.dll,14'
 $shortcut.Save()
+
 Write-Host "Atalho criado: $shortcutPath"

@@ -4,16 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Processando</title>
-  <link rel="stylesheet" href="/static/style.css?token={{ token }}">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/job.js" defer></script>
 </head>
-<body class="process-page">
+<body class="process-page" data-job="{{ job_id }}">
   <main class="process-layout">
-    <section class="process-card">
-      <div class="process-heading"><span class="spinner" aria-hidden="true"></span><div><p class="eyebrow">Operação protegida</p><h1>Processando</h1></div></div>
-      <p id="message">Iniciando…</p>
-      <ol id="progress"></ol>
+    <section class="process-card" aria-labelledby="process-title">
+      <div class="process-heading"><span class="spinner" aria-hidden="true"></span><div><p class="eyebrow">Operação protegida</p><h1 id="process-title">Processando</h1></div></div>
+      <p id="message" aria-live="polite">Iniciando…</p>
+      <div class="progress-summary" id="progress-summary" aria-label="Resumo do processamento">
+        <div><small>Página</small><strong id="summary-page">—</strong></div>
+        <div><small>Analisados</small><strong id="summary-analyzed">0</strong></div>
+        <div><small>Adicionados ao lote</small><strong id="summary-added">0</strong></div>
+        <div><small>Ignorados</small><strong id="summary-ignored">0</strong></div>
+      </div>
+      <p class="last-warning" id="last-warning" role="status" aria-live="polite" hidden></p>
+      <ol id="progress" aria-live="polite"></ol>
     </section>
   </main>
-  <script>const token={{ token|tojson }};const job={{ job_id|tojson }};async function poll(){const r=await fetch(`/api/trabalho/${job}?token=${encodeURIComponent(token)}`,{cache:'no-store'});const d=await r.json();document.getElementById('message').textContent=d.message;document.getElementById('progress').innerHTML=(d.progress||[]).map(x=>`<li>${x.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</li>`).join('');if(d.status==='DONE'&&d.result&&d.result.redirect){location.href=d.result.redirect;return}if(d.status==='ERROR'){document.body.classList.add('error');return}setTimeout(poll,800)}poll();</script>
+  <footer class="system-footer">
+    <span class="system-footer__brand">BPA System &mdash; Desenvolvido por Gabriel da Silva Fonseca</span>
+  </footer>
 </body>
 </html>

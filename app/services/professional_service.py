@@ -9,9 +9,21 @@ from app.services.patient_service import canonical, valid_cns
 
 
 class ProfessionalRegistry:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, forced_cnes: str = ""):
         raw = json.loads(path.read_text(encoding="utf-8"))
-        self.items = [Professional(**item) for item in raw["professionals"]]
+        self.items = [
+            Professional(
+                **{
+                    **item,
+                    **(
+                        {"cnes": forced_cnes, "create_if_missing": True}
+                        if forced_cnes
+                        else {}
+                    ),
+                }
+            )
+            for item in raw["professionals"]
+        ]
         for item in self.items:
             if not valid_cns(item.cns):
                 raise ValueError(f"CNS profissional inválido: {item.name}")

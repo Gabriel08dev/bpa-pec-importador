@@ -4,7 +4,7 @@ Aplicação local para Windows que importa atendimentos do CEAE, consulta o PEC 
 
 ## Tecnologia escolhida
 
-Python 3.12 foi escolhido porque reúne, no mesmo runtime para Windows, Playwright com Microsoft Edge, leitura de Excel, PDF, OCR opcional, acesso ao Gerenciador de Credenciais e uma interface HTTP local. FastAPI atende apenas em `127.0.0.1`, numa porta aleatória e com token secreto por execução. Os binários `isql` e `gbak` do Firebird 1.5 já validados neste computador são usados como `fb_query.exe` e `fb_backup.exe`; isso evita depender de um driver moderno incompatível com a base legada.
+Python 3.12 foi escolhido porque reúne, no mesmo runtime para Windows, Playwright com Microsoft Edge, leitura de Excel, PDF, OCR opcional, acesso ao Gerenciador de Credenciais e uma interface HTTP local. FastAPI atende somente em `127.0.0.1`, usando uma porta local disponível escolhida a cada execução; o acesso começa por um token secreto e passa para uma sessão protegida. Os binários `isql` e `gbak` do Firebird 1.5 já validados neste computador são usados como `fb_query.exe` e `fb_backup.exe`; isso evita depender de um driver moderno incompatível com a base legada.
 
 ## Instalação e abertura
 
@@ -20,16 +20,31 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 
 ## Fluxo de uso
 
+### Com planilha
+
 1. Baixe o modelo Excel no painel ou escolha um `.xlsx`, `.csv` ou `.tsv` pelo seletor do Windows.
 2. Informe explicitamente a competência `AAAAMM` e importe.
 3. Revise linhas, profissionais, datas, CPFs, nascimentos e CIDs. A planilha serve para pesquisa; nome e dados finais vêm do PEC.
-4. Clique em **Incluir todos para consultar no PEC**. Faça login manualmente se necessário. O robô usa apenas `/cidadao`, a base local e o botão **Visualizar**; não usa “Atualizar cadastro” nem pesquisa nacional.
-5. Resultado zero vira `IGNORADO_PEC`; múltiplos resultados ou divergência viram `AGUARDANDO_CONFIRMACAO`; falha individual vira `ERRO_TECNICO` e os demais continuam.
-6. Gere o PDF de divergências e o lote final. Itens aguardando confirmação nunca entram na prévia de gravação.
-7. Gere a prévia Firebird. O sistema lê a base ativa, valida CIDs, vínculos, procedimentos, duplicidades, folhas e sequências.
-8. Revise competência, profissional, data, folha e sequência. Digite exatamente `ADICIONAR`.
-9. A aplicação verifica se `bpamag.exe` está fechado, reabre e revalida o banco, recalcula a prévia, cria e valida um `.fbk`, executa uma transação com um único `COMMIT` e verifica cada inclusão.
-10. Abra o BPA Magnético, execute a consistência e exporte pelo próprio BPA. A aprovação final depende da consistência do BPA, da exportação e do processamento pelo gestor/SIA.
+4. Clique em **Incluir todos para consultar no PEC**. Faça login manualmente se necessário. Para lotes de planilha, o robô consulta somente `/cidadao`; a ausência do atendimento na Lista de atendimentos não bloqueia a produção informada.
+5. O Cadastro individual complementa os dados demográficos e confirma a identidade do paciente. Divergências de CPF ou nascimento e resultados cadastrais ambíguos nunca são confirmados automaticamente.
+6. Resultado cadastral zero vira `IGNORADO_PEC`; múltiplos cadastros ou divergência de identidade viram `AGUARDANDO_CONFIRMACAO`; falha individual vira `ERRO_TECNICO` e os demais continuam.
+7. Gere o PDF de divergências e o lote final. Itens aguardando confirmação nunca entram na prévia de gravação.
+8. Gere a prévia Firebird. O sistema lê a base ativa, valida CIDs, vínculos, procedimentos, duplicidades, folhas e sequências. Atendimentos novos são separados dos registros existentes cujo CID está vazio.
+9. Revise competência, profissional, data, folha e sequência. Digite exatamente `ADICIONAR`.
+10. A aplicação verifica se `bpamag.exe` está fechado, reabre e revalida o banco, recalcula a prévia, cria e valida um `.fbk`, executa uma transação com um único `COMMIT` e verifica cada inclusão.
+11. Abra o BPA Magnético, execute a consistência e exporte pelo próprio BPA. A aprovação final depende da consistência do BPA, da exportação e do processamento pelo gestor/SIA.
+
+### Sem planilha
+
+1. Na página inicial, abra **Buscar sem planilha**.
+2. Informe a competência de apresentação e as datas inicial e final.
+3. Clique em **Buscar atendimentos no PEC**. Se solicitado, entre e selecione seu acesso na janela do PEC.
+4. Mantenha a janela automatizada aberta. O sistema aplica o período, considera atendimentos em andamento, em escuta inicial e realizados, e usa somente **Visualizar atendimentos do dia**.
+5. Se a sessão cair ou a paginação falhar, o importador tenta reabrir a lista, reaplicar os filtros e retomar a leitura. Faça login novamente se o PEC pedir. A retomada usa o progresso guardado enquanto o importador estiver aberto.
+6. Se a opção **Visualizar atendimentos do dia** estiver desativada, o importador indica o item como ignorado. A busca tenta ler novamente os resumos pendentes na mesma página. Quando o resumo é do paciente do cartão, mas diverge em data ou profissional, o cartão fica pendente na revisão do lote. A gravação no BPA exige um atendimento confirmado.
+7. Ao final, o lote é criado com paciente, nascimento, data e profissional extraídos da Lista de atendimentos. O mesmo paciente com profissionais diferentes permanece em linhas distintas.
+8. No lote criado, use **Trazer CIDs da planilha** para enviar a planilha preenchida. O CID só é associado quando CPF, data do atendimento e profissional correspondem ao mesmo registro. O mesmo paciente com outro médico ou em outro dia não recebe o CID por engano.
+9. Clique em **Consultar todos no PEC** para complementar os dados pelo Cadastro individual. O cruzamento dos CIDs pode ser feito antes ou depois dessa consulta, mas sempre antes da prévia Firebird. Depois, siga a revisão, prévia e confirmação protegida já existentes.
 
 ## Regras implementadas
 
@@ -38,12 +53,16 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 - Cada profissional tem sua sequência própria. Datas são ordenadas; até 20 pacientes ocupam a folha; a 21ª linha abre outra; datas e profissionais nunca são misturados.
 - Folhas existentes não são renumeradas. Uma sequência livre da mesma data é preenchida; data nova usa a próxima folha depois da maior existente.
 - Profissional é identificado pelo CNS. O nome aceita acentos, preposições e abreviações apenas na importação.
+- Nos lotes originados da Lista de atendimentos do PEC, os CIDs de uma planilha são cruzados pela chave CPF + data + profissional. Linhas sem correspondência, inválidas ou com CIDs conflitantes ficam sem CID; uma prévia anterior é invalidada e deve ser gerada novamente.
 - Médicos usam `0301010072`; demais profissionais usam `0301010048`. Um profissional marcado localmente com `create_if_missing` pode ter seu vínculo criado com `INSERT ... WHERE NOT EXISTS` na primeira gravação que precisar dele.
 - CID é opcional, perde o ponto e é consultado em `S_CID`. CID múltiplo, ilegível ou ausente na tabela fica vazio com aviso.
+- Se o atendimento já existir, o CID só é completado quando houver correspondência única de CPF + data + profissional, o CID atual estiver vazio e a planilha trouxer um CID válido. CIDs já preenchidos nunca são substituídos.
 - CADCNS é localizado primeiro por CNS, depois CPF e nascimento, com escolha determinística pelo maior `ID_CADCNS`. Grafia diferente não bloqueia identidade confirmada. Cadastro antigo nunca é alterado.
+- O CNS do paciente é opcional. Sem um CNS válido, a prévia usa o CPF válido e o campo de CNS fica em branco no BPA.
+- Na revisão do lote, **Ignorar linhas sem endereço** marca de uma vez os atendimentos confirmados sem logradouro. A ação invalida uma prévia anterior; gere outra antes de gravar.
 - Nome, mãe, logradouro, número, complemento, bairro e e-mail respeitam os limites observados do banco. O valor completo fica na revisão e o ajuste legado gera aviso.
 - Tipo de logradouro usa `081`; Brasileira vira `010`; Carangola vira IBGE `311330`, sem aplicar esse IBGE a outra cidade.
-- O SQL de lote é CP1252, termina com quebra de linha, contém somente `INSERT` e consultas, usa `NOT EXISTS`, transação explícita e um único `COMMIT`. `UPDATE`, `DELETE` e alterações de esquema são recusados pelo executor.
+- O SQL de lote é CP1252, termina com quebra de linha, usa `SET BAIL ON`, transação explícita e um único `COMMIT`. Assim, qualquer erro interrompe o script antes do commit. Inclusões usam `INSERT ... WHERE NOT EXISTS`. A única atualização permitida é `S_PRD.PRD_CID` quando o campo está nulo/vazio e o atendimento foi identificado exatamente; qualquer outro `UPDATE`, todo `DELETE` e alterações de esquema são recusados pelo executor.
 - Retry lê novamente o banco, classifica itens já existentes e tenta somente os pendentes.
 
 ## Arquivos do lote
@@ -54,7 +73,10 @@ Os backups ficam em `backups/BPAMAG_ANTES_IMPORTACAO_AAAAMMDD_HHMMSS.fbk`. A apl
 
 ## Segurança e LGPD
 
-- Servidor vinculado exclusivamente a `127.0.0.1`, porta aleatória, token de 256 bits, CSP, `Cache-Control: no-store`, `X-Frame-Options: DENY` e `Referrer-Policy: no-referrer`.
+- Servidor vinculado exclusivamente a `127.0.0.1`, em uma porta local disponível. Somente o próprio computador pode estabelecer conexão.
+- O token de 256 bits é usado apenas no primeiro acesso. Depois da validação, ele é retirado da URL e substituído por uma sessão local de 8 horas em cookie `HttpOnly` e `SameSite=Strict`.
+- Não há publicação em rede, túnel, domínio externo ou acesso por outros computadores nesta versão.
+- CSP, `Cache-Control: no-store`, `X-Frame-Options: DENY` e `Referrer-Policy: no-referrer` continuam ativos.
 - Senhas ficam no Credential Manager nos alvos `BPA_PEC_IMPORTADOR_FIREBIRD` e `BPA_PEC_IMPORTADOR_PEC` e chegam ao Firebird somente por ambiente do subprocesso.
 - Nenhuma senha é passada na linha de comando, arquivo SQL, JSON ou log.
 - O perfil persistente do Edge fica em `.pec_profile`; restrinja o acesso ao usuário do Windows e encerre a sessão ao trocar de operador.

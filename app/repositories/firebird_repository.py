@@ -5,6 +5,7 @@ from collections import Counter
 from app.firebird.legacy_runner import LegacyRunner, parse_list_output
 from app.firebird.sql_builder import literal
 from app.models import ExistingProduction, ReviewItem
+from app.services.patient_service import normalize_service_date
 
 
 class FirebirdRepository:
@@ -19,15 +20,62 @@ SET LIST ON;
 SET TRANSACTION READ ONLY;
 SELECT PRD_CNSMED AS PROFESSIONAL_CNS, PRD_UID AS CNES, PRD_CBO AS CBO, PRD_CMP AS COMPETENCE,
        PRD_DTATEN AS SERVICE_DATE, PRD_FLH AS SHEET_NO, PRD_SEQ AS SEQUENCE_NO,
-       PRD_CPF_PCNTE AS PATIENT_CPF, PRD_CNSPAC AS PATIENT_CNS
-FROM S_PRD WHERE PRD_CMP={literal(competence)} AND PRD_ORG='BPI' AND PRD_CNSMED IN ({values});
+       PRD_CPF_PCNTE AS PATIENT_CPF, PRD_CNSPAC AS PATIENT_CNS,
+       PRD_CID AS CID_VALUE, PRD_PA AS PROCEDURE_VALUE, PRD_ORG AS ORIGIN_VALUE
+FROM S_PRD WHERE PRD_CMP={literal(competence)} AND PRD_CNSMED IN ({values});
 ROLLBACK;
 QUIT;
 """
-        return [ExistingProduction(professional_cns=row.get("PROFESSIONAL_CNS", ""), cnes=row.get("CNES", ""), cbo=row.get("CBO", ""),
-                                   competence=row.get("COMPETENCE", ""), service_date=row.get("SERVICE_DATE", ""), sheet=row.get("SHEET_NO", ""),
-                                   sequence=row.get("SEQUENCE_NO", ""), patient_cpf=row.get("PATIENT_CPF", ""), patient_cns=row.get("PATIENT_CNS", ""))
-                for row in parse_list_output(self.runner.run(sql))]
+        return [
+            ExistingProduction(
+                professional_cns=row.get("PROFESSIONAL_CNS", ""),
+                cnes=row.get("CNES", ""),
+                cbo=row.get("CBO", ""),
+                competence=row.get("COMPETENCE", ""),
+                service_date=row.get("SERVICE_DATE", ""),
+                sheet=row.get("SHEET_NO", ""),
+                sequence=row.get("SEQUENCE_NO", ""),
+                patient_cpf=row.get("PATIENT_CPF", ""),
+                patient_cns=row.get("PATIENT_CNS", ""),
+                cid=row.get("CID_VALUE", ""),
+                procedure=row.get("PROCEDURE_VALUE", ""),
+                origin=row.get("ORIGIN_VALUE", ""),
+            )
+            for row in parse_list_output(self.runner.run(sql))
+        ]
+
+    def correct_swapped_service_dates(
+        self, competence: str, rows: list[ExistingProduction]
+    ) -> int:
+        """Corrige somente linhas cuja inversão dia/mês coincide com a competência."""
+        statements: list[str] = []
+        for row in rows:
+            corrected, warning = normalize_service_date(row.service_date, competence)
+            if not warning:
+                continue
+            statements.append(
+                "UPDATE S_PRD SET PRD_DTATEN={new_date} WHERE "
+                "PRD_CNSMED={professional} AND PRD_UID={cnes} AND PRD_CBO={cbo} "
+                "AND PRD_CMP={competence} AND PRD_DTATEN={old_date} "
+                "AND PRD_FLH={sheet} AND PRD_SEQ={sequence} "
+                "AND PRD_CPF_PCNTE={cpf} AND PRD_CNSPAC={cns};".format(
+                    new_date=literal(corrected),
+                    professional=literal(row.professional_cns),
+                    cnes=literal(row.cnes),
+                    cbo=literal(row.cbo),
+                    competence=literal(competence),
+                    old_date=literal(row.service_date),
+                    sheet=literal(row.sheet),
+                    sequence=literal(row.sequence),
+                    cpf=literal(row.patient_cpf),
+                    cns=literal(row.patient_cns),
+                )
+            )
+        if not statements:
+            return 0
+        sql = "SET BAIL ON;\nSET TRANSACTION;\n" + "\n".join(statements) + "\nCOMMIT;\nQUIT;\n"
+        self.runner.run(sql, allow_update=True)
+        return len(statements)
 
     def validate_cids(self, cids: list[str]) -> set[str]:
         values = sorted(set(value for value in cids if value))
@@ -63,31 +111,17 @@ QUIT;
         statements = []
         for index, item in enumerate(items, 1):
             p = item.patient
+            cns_filter = f"C.CNS={literal(p.cns)} OR " if p.cns else ""
+            cns_priority = (
+                f"CASE WHEN C.CNS={literal(p.cns)} THEN 0 ELSE 1 END,\n         " if p.cns else ""
+            )
             statements.append(f"""SELECT FIRST 1 {index} AS ITEM_INDEX, C.ID_CADCNS AS DB_ID, C.CNS AS DB_CNS,
  C.NUM_CPF AS DB_CPF, C.DTNASC AS DB_BIRTH, C.NOME AS DB_NAME
-FROM CADCNS C WHERE C.CNS={literal(p.cns)} OR C.NUM_CPF={literal(p.cpf)}
-ORDER BY CASE WHEN C.CNS={literal(p.cns)} THEN 0 ELSE 1 END,
-         CASE WHEN C.NUM_CPF={literal(p.cpf)} THEN 0 ELSE 1 END,
+FROM CADCNS C WHERE {cns_filter}C.NUM_CPF={literal(p.cpf)}
+ORDER BY {cns_priority}CASE WHEN C.NUM_CPF={literal(p.cpf)} THEN 0 ELSE 1 END,
          CASE WHEN C.DTNASC={literal(p.birth_date)} THEN 0 ELSE 1 END, C.ID_CADCNS DESC;""")
         output = self.runner.run("SET LIST ON;\nSET TRANSACTION READ ONLY;\n" + "\n".join(statements) + "\nROLLBACK;\nQUIT;\n")
         return {int(row["ITEM_INDEX"]): row for row in parse_list_output(output) if row.get("ITEM_INDEX")}
-
-    def non_bpi_conflicts(self, items: list[ReviewItem]) -> list[int]:
-        statements = []
-        for index, item in enumerate(items, 1):
-            p = item.patient
-            identity = f"(P.PRD_CPF_PCNTE={literal(p.cpf)} OR P.PRD_CNSPAC={literal(p.cns)})"
-            statements.append(
-                f"SELECT COUNT(*) AS CONFLICT_{index} FROM S_PRD P "
-                f"WHERE P.PRD_CNSMED={literal(item.professional_cns)} "
-                f"AND P.PRD_DTATEN={literal(item.service_date)} AND {identity} "
-                "AND (P.PRD_ORG IS NULL OR P.PRD_ORG<>'BPI');"
-            )
-        output = self.runner.run("SET LIST ON;\nSET TRANSACTION READ ONLY;\n" + "\n".join(statements) + "\nROLLBACK;\nQUIT;\n")
-        values: dict[str, str] = {}
-        for row in parse_list_output(output):
-            values.update(row)
-        return [index for index in range(1, len(items) + 1) if int(values.get(f"CONFLICT_{index}", "0")) > 0]
 
     def manifest(self, competence: str, professional_cns: list[str]) -> dict:
         rows = self.existing_production(competence, professional_cns)

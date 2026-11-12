@@ -14,7 +14,15 @@ class Status(StrEnum):
     AGUARDANDO_CONFIRMACAO = "AGUARDANDO_CONFIRMACAO"
     CID_OMITIDO = "CID_OMITIDO"
     JA_EXISTE_NO_BPA = "JA_EXISTE_NO_BPA"
+    PRONTO_PARA_ATUALIZAR_CID = "PRONTO_PARA_ATUALIZAR_CID"
+    PRONTO_PARA_CORRIGIR_CNES = "PRONTO_PARA_CORRIGIR_CNES"
+    PRONTO_PARA_CORRIGIR_CNES_E_CID = "PRONTO_PARA_CORRIGIR_CNES_E_CID"
     ERRO_TECNICO = "ERRO_TECNICO"
+
+
+PREVIEW_CANDIDATE_STATUSES = frozenset(
+    {Status.PEC_CONFIRMADO, Status.CID_OMITIDO, Status.PRONTO_PARA_ADICIONAR}
+)
 
 
 @dataclass
@@ -101,6 +109,9 @@ class ExistingProduction:
     sequence: str
     patient_cpf: str = ""
     patient_cns: str = ""
+    cid: str = ""
+    procedure: str = ""
+    origin: str = ""
 
 
 @dataclass
