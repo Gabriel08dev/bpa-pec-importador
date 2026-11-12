@@ -9,6 +9,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _firebird_tool(local_name: str, installed_name: str) -> Path:
+    """Localiza primeiro o binário privado e depois o Firebird 1.5 instalado."""
+    local = ROOT / "firebird" / "bin" / local_name
+    candidates = (
+        local,
+        Path(r"C:\Program Files (x86)\Firebird\Firebird_1_5\bin") / installed_name,
+        Path(r"C:\Program Files\Firebird\Firebird_1_5\bin") / installed_name,
+    )
+    return next((candidate for candidate in candidates if candidate.is_file()), local)
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path = ROOT
@@ -21,8 +32,8 @@ class Settings:
     outputs: Path = ROOT / "outputs"
     backups: Path = ROOT / "backups"
     profile: Path = ROOT / ".pec_profile"
-    helper_query: Path = ROOT / "firebird" / "bin" / "fb_query.exe"
-    helper_backup: Path = ROOT / "firebird" / "bin" / "fb_backup.exe"
+    helper_query: Path = _firebird_tool("fb_query.exe", "isql.exe")
+    helper_backup: Path = _firebird_tool("fb_backup.exe", "gbak.exe")
     professionals_file: Path = ROOT / "data" / "profissionais.json"
     config_file: Path = ROOT / "data" / "config.json"
 

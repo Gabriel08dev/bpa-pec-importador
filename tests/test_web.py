@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app, free_port
+from app.models import Patient, ReviewItem, Status
 from app.security import SESSION_COOKIE, TOKEN
 from app.web.routes import templates
 
@@ -104,6 +105,68 @@ def test_batch_template_offers_cpf_correction_and_ignore_for_invalid_cpf():
     assert "Ignorar linha" in html
 
 
+def test_batch_can_ignore_only_confirmed_rows_without_an_address(tmp_path):
+    app = create_app(Settings(
+        outputs=tmp_path / "outputs", backups=tmp_path / "backups", profile=tmp_path / "profile",
+    ))
+    svc = app.state.services
+    batch_id = "LOTE-ENDERECOS"
+    items = [
+        ReviewItem(
+            row=row, original_identifier="52998224725", professional_name="Profissional Teste",
+            professional_cns="700000000000005", cbo="225250", cnes="4998782",
+            procedure="0301010072", service_date="20260701", informed_birth="20000101",
+            original_cid="", status=status,
+            patient=Patient(name="Paciente Teste", cpf="52998224725", street=street),
+        ).to_dict()
+        for row, status, street in [
+            (2, Status.PEC_CONFIRMADO, ""),
+            (3, Status.CID_OMITIDO, "  "),
+            (4, Status.PEC_CONFIRMADO, "Rua de Teste"),
+            (5, Status.REVISAO_INICIAL, ""),
+            (6, Status.IGNORADO_PEC, ""),
+        ]
+    ]
+    payload = {"batch_id": batch_id, "competence": "202607", "items": items}
+    base_items = [
+        dict(item, status=Status.REVISAO_INICIAL.value) if item["row"] != 6 else item
+        for item in items
+    ]
+    svc["batch"].update_review(
+        batch_id, dict(payload, items=base_items), filename="revisao_planilha.json",
+    )
+    final = svc["batch"].update_review(batch_id, payload)
+    reviews = svc["reviews"]
+    reviews.write(batch_id, "lote_revisado.json", final)
+    preview = reviews.write(
+        batch_id, "previa_firebird.json", {"based_on_review_sha256": final["review_sha256"], "items": []},
+    )
+
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
+        login(client)
+        path = f"/lote/{batch_id}"
+        html = client.get(path).text
+        assert "Ignorar linhas sem endereço (2)" in html and html.count("Adicionar endereço.") == 2
+        action = f"{path}/ignorar-sem-endereco"
+        assert client.post(action, data={"review_sha256": "revisao-antiga"}).status_code == 400
+        assert preview.exists()
+        response = client.post(action, data={"review_sha256": final["review_sha256"]}, follow_redirects=False)
+        assert response.status_code == 303
+        html = client.get(path).text
+        assert "Ignorar linhas sem endereço" not in html and "Adicionar endereço." not in html
+
+    assert not preview.exists()
+    for filename, previous in [
+        ("revisao_final.json", items), ("revisao_planilha.json", base_items), ("lote_revisado.json", items),
+    ]:
+        saved = reviews.read(batch_id, filename)
+        reviews.verify_hash(saved)
+        assert saved["items"][2:] == previous[2:]
+        for item in saved["items"][:2]:
+            assert item["status"] == Status.IGNORADO_PEC
+            assert item["sources"]["manual_review"] == "IGNORADO_SEM_ENDERECO"
+
+
 def test_home_offers_pec_attendance_search_without_spreadsheet():
     html=templates.env.get_template("index.html").render(
         token="token-test",
@@ -180,8 +243,27 @@ def test_pec_search_rejects_reverse_period_and_duplicate_running_job():
             )
             assert duplicate.status_code == 409
             assert "Já existe uma busca em andamento" in duplicate.text
+            assert client.post("/lote/lote-de-teste/pec").status_code == 409
+            JOBS["synthetic-running"]["kind"] = "PEC_CONSULT"
+            assert client.post(
+                "/pec/lista-atendimentos",
+                data={"competence": "202607", "start_date": "2026-07-01", "end_date": "2026-07-20"},
+            ).status_code == 409
         finally:
             JOBS.pop("synthetic-running", None)
+
+
+def test_job_progress_can_be_read_incrementally(tmp_path, monkeypatch):
+    from app.web.routes import JOBS
+
+    settings = Settings(outputs=tmp_path / "outputs", profile=tmp_path / "profile", backups=tmp_path / "backups")
+    app = create_app(settings)
+    monkeypatch.setitem(JOBS, "job-test", {"status": "RUNNING", "message": "teste", "progress": ["um", "dois"]})
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
+        login(client)
+        assert client.get("/api/trabalho/job-test").json()["progress"] == ["um", "dois"]
+        assert client.get("/api/trabalho/job-test?after=1").json()["progress"] == ["dois"]
+        assert client.get("/api/trabalho/job-test?after=2").json()["progress"] == []
 
 
 def test_error_template_supports_firebird_preview_message():
@@ -195,6 +277,58 @@ def test_error_template_supports_firebird_preview_message():
     )
     assert "Nenhum item confirmado" in html
     assert "Voltar ao lote" in html
+
+
+def test_pec_retry_preserves_confirmed_rows_in_existing_batch(tmp_path, monkeypatch):
+    import time
+
+    from app.models import Status
+    from app.web.routes import JOBS
+
+    root = Path(__file__).parents[1]
+    app = create_app(Settings(
+        outputs=tmp_path / "outputs", backups=tmp_path / "backups", profile=tmp_path / "profile",
+        professionals_file=root / "data" / "profissionais.example.json",
+    ))
+    svc = app.state.services
+    records = [
+        {
+            "name": f"Paciente de teste {index}",
+            "cpf": cpf,
+            "birth_date": "01/02/2000",
+            "service_date": "20261020",
+            "professional": "Ana Profissional Exemplo",
+        }
+        for index, cpf in enumerate(("52998224725", "11144477735"), 1)
+    ]
+    batch_id, original = svc["batch"].import_pec_attendances(records, "202610", "2026-10-01", "2026-10-31")
+    confirmed = dict(original["items"][0], status=Status.PEC_CONFIRMADO, warnings=["Já verificado"])
+    failed = dict(original["items"][1], status=Status.ERRO_TECNICO, reason="Falha na navegação")
+    svc["batch"].update_review(batch_id, dict(original, items=[confirmed, failed]))
+
+    def consult(items, progress, *, validate_attendance):
+        assert [item.row for item in items] == [2]
+        assert items[0].status == Status.REVISAO_INICIAL
+        items[0].status = Status.PEC_CONFIRMADO
+
+    monkeypatch.setattr(svc["pec"], "consult", consult)
+    with TestClient(app, base_url="http://localhost", client=("127.0.0.1", 50000)) as client:
+        login(client)
+        assert "Retomar consulta no PEC" in client.get(f"/lote/{batch_id}").text
+        started = client.post(f"/lote/{batch_id}/pec", follow_redirects=False)
+        assert started.status_code == 303
+        job_id = started.headers["location"].rsplit("/", 1)[-1]
+        try:
+            deadline = time.monotonic() + 5
+            while JOBS[job_id]["status"] == "RUNNING" and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert JOBS[job_id]["status"] == "DONE", JOBS[job_id]["message"]
+        finally:
+            if JOBS[job_id]["status"] != "RUNNING":
+                JOBS.pop(job_id)
+    updated = svc["reviews"].read(batch_id, "revisao_final.json")
+    assert updated["items"][0] == confirmed
+    assert updated["items"][1]["status"] == Status.PEC_CONFIRMADO
 
 
 def test_new_layout_preserves_every_operational_batch_action():

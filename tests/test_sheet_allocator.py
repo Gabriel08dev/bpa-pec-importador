@@ -92,13 +92,10 @@ def test_existing_wrong_cnes_is_moved_to_ceae_with_new_destination_slot():
     old = existing(sheet="004", seq="03", cnes="2114771", cid="E119")
     destination = existing(sheet="007", seq="01", cpf="11111111111", cnes="4998782")
     allocate([row], [old, destination])
-    assert row.status == Status.PRONTO_PARA_CORRIGIR_CNES
+    assert row.status == Status.JA_EXISTE_NO_BPA
     assert row.cnes == "4998782"
-    assert (row.sheet, row.sequence) == ("007", "02")
-    assert row.sources["existing_cnes"] == "2114771"
-    assert row.sources["existing_sheet"] == "004"
-    assert row.sources["existing_sequence"] == "03"
-    assert row.sources["existing_cid"] == "E119"
+    assert (row.sheet, row.sequence) == ("", "")
+    assert "nenhum campo" in row.reason
 
 
 def test_existing_wrong_cnes_and_empty_cid_plans_one_combined_update():
@@ -120,5 +117,5 @@ def test_wrong_cnes_with_filled_cid_preserves_existing_cid():
     row = item(1, cpf="99999999999")
     row.final_cid = "Z713"
     allocate([row], [existing(cnes="2114771", cid="E119")])
-    assert row.status == Status.PRONTO_PARA_CORRIGIR_CNES
-    assert row.sources["existing_cid"] == "E119"
+    assert row.status == Status.JA_EXISTE_NO_BPA
+    assert "nenhum campo" in row.reason

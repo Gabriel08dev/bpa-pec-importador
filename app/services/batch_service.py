@@ -6,15 +6,31 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.models import Patient, ReviewItem, Status
+from app.models import PREVIEW_CANDIDATE_STATUSES, Patient, ReviewItem, Status
 from app.repositories.review_repository import ReviewRepository, content_hash
 from app.services.cid_service import normalize_cid
-from app.services.patient_service import normalize_cpf, normalize_date, normalize_pec_patient, valid_cpf
+from app.services.patient_service import (
+    canonical,
+    normalize_cpf,
+    normalize_date,
+    normalize_pec_patient,
+    normalize_service_date,
+    valid_cpf,
+)
 from app.services.professional_service import ProfessionalRegistry
 from app.services.spreadsheet_service import read_cid_rows, read_rows, sha256_file
 
 
 CID_CROSS_SOURCE = "PLANILHA_CRUZADA_CPF_DATA_PROFISSIONAL"
+
+
+def rows_missing_address(payload: dict[str, Any]) -> set[int]:
+    return {
+        item["row"]
+        for item in payload.get("items", [])
+        if item["status"] in PREVIEW_CANDIDATE_STATUSES
+        and canonical(item["patient"].get("street")) in {"", "NAO INFORMADO", "SEM ENDERECO"}
+    }
 
 
 def validate_competence(value: str) -> str:
@@ -36,7 +52,9 @@ class BatchService:
         for raw in read_rows(path):
             try:
                 professional = self.professionals.match_name(raw["professional"])
-                service_date = normalize_date(raw["service_date"])
+                service_date, date_warning = normalize_service_date(
+                    raw["service_date"], competence
+                )
                 birth = normalize_date(raw["birth_date"])
                 cpf = normalize_cpf(raw["cpf"])
                 cid, warning = normalize_cid(raw.get("cid", ""))
@@ -49,6 +67,7 @@ class BatchService:
                     sources={"cpf":"PLANILHA","birth_date":"PLANILHA","professional":"LISTA_CEAE","service_date":"PLANILHA","competence":competence},
                 )
                 if warning: item.warnings.append(warning)
+                if date_warning: item.warnings.append(date_warning)
                 key = (cpf, professional.cns, service_date)
                 if key in seen:
                     item.status = Status.IGNORADO_DUPLICIDADE
@@ -96,9 +115,13 @@ class BatchService:
                 birth_date=str(raw.get("birth_date", "")),
             )
             try:
+                if raw.get("pec_pending_reason"):
+                    raise ValueError(raw["pec_pending_reason"])
                 patient, patient_warnings = normalize_pec_patient(raw)
                 professional = self.professionals.match_name(professional_name)
-                service_date = normalize_date(service_date)
+                service_date, date_warning = normalize_service_date(
+                    service_date, competence
+                )
                 birth = normalize_date(raw.get("birth_date", ""))
                 cpf = normalize_cpf(raw.get("cpf", ""))
                 item = ReviewItem(
@@ -124,6 +147,8 @@ class BatchService:
                     },
                 )
                 item.warnings.extend(patient_warnings)
+                if date_warning:
+                    item.warnings.append(date_warning)
                 key = (cpf, professional.cns, service_date)
                 if key in seen:
                     item.status = Status.IGNORADO_DUPLICIDADE
@@ -179,7 +204,7 @@ class BatchService:
     def resolve_newly_registered_professionals(
         self, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], int]:
-        """Reavalia somente linhas antes barradas por profissional desconhecido."""
+        """Reavalia linhas da planilha e profissionais recém-cadastrados."""
         items = [ReviewItem.from_dict(raw) for raw in payload.get("items", [])]
         resolved = 0
         unknown_reason = "Profissional não identificado com segurança:"
@@ -191,50 +216,66 @@ class BatchService:
             and item.patient.cpf
             and item.service_date
             and item.status != Status.IGNORADO_DUPLICIDADE
+            and item.status != Status.AGUARDANDO_CONFIRMACAO
         }
         for item in items:
-            if (
-                item.professional_cns
-                or item.status != Status.AGUARDANDO_CONFIRMACAO
-                or not item.reason.startswith(unknown_reason)
-            ):
+            if item.status != Status.AGUARDANDO_CONFIRMACAO:
                 continue
+            # Registros capturados diretamente do PEC só podem ser retomados
+            # quando a pendência era o profissional. Já as linhas da planilha
+            # conservam os campos brutos e podem ser revalidadas após uma
+            # melhoria segura dos normalizadores (como DD/MM/AA).
+            if pec_origin:
+                if item.professional_cns or not item.reason.startswith(unknown_reason):
+                    continue
             try:
                 professional = self.professionals.match_name(item.professional_name)
             except ValueError:
                 continue
+
+            # Na importação da planilha, o profissional é validado antes dos
+            # demais campos. Se ele ainda não estava cadastrado, CPF, datas e CID
+            # permaneceram no formato bruto. Normalize-os agora para que a linha
+            # possa de fato prosseguir para a consulta no PEC. Todos os valores
+            # são preparados antes de alterar o item, evitando uma linha
+            # parcialmente resolvida quando algum campo ainda é inválido.
+            if not pec_origin:
+                try:
+                    service_date, date_warning = normalize_service_date(
+                        item.service_date, str(payload.get("competence", ""))
+                    )
+                    informed_birth = normalize_date(item.informed_birth)
+                    original_identifier = normalize_cpf(item.original_identifier)
+                    final_cid, warning = normalize_cid(item.original_cid)
+                except ValueError as exc:
+                    item.reason = str(exc)
+                    continue
+
+                item.service_date = service_date
+                item.informed_birth = informed_birth
+                item.original_identifier = original_identifier
+                item.patient.cpf = original_identifier
+                item.patient.birth_date = informed_birth
+                item.final_cid = final_cid
+                if warning and warning not in item.warnings:
+                    item.warnings.append(warning)
+                if date_warning and date_warning not in item.warnings:
+                    item.warnings.append(date_warning)
+                item.sources.update(
+                    {
+                        "cpf": "PLANILHA",
+                        "birth_date": "PLANILHA",
+                        "service_date": "PLANILHA",
+                        "competence": str(payload.get("competence", "")),
+                    }
+                )
+
             item.professional_name = professional.name
             item.professional_cns = professional.cns
             item.cbo = professional.cbo
             item.cnes = professional.cnes
             item.procedure = professional.procedure
             item.create_professional_if_missing = professional.create_if_missing
-
-            # Na importação da planilha, o profissional é validado antes dos
-            # demais campos. Se ele ainda não estava cadastrado, CPF, datas e CID
-            # permaneceram no formato bruto. Normalize-os agora para que a linha
-            # possa de fato prosseguir para a consulta no PEC.
-            if not pec_origin:
-                try:
-                    item.service_date = normalize_date(item.service_date)
-                    item.informed_birth = normalize_date(item.informed_birth)
-                    item.original_identifier = normalize_cpf(item.original_identifier)
-                    item.patient.cpf = item.original_identifier
-                    item.patient.birth_date = item.informed_birth
-                    item.final_cid, warning = normalize_cid(item.original_cid)
-                    if warning and warning not in item.warnings:
-                        item.warnings.append(warning)
-                    item.sources.update(
-                        {
-                            "cpf": "PLANILHA",
-                            "birth_date": "PLANILHA",
-                            "service_date": "PLANILHA",
-                            "competence": str(payload.get("competence", "")),
-                        }
-                    )
-                except ValueError as exc:
-                    item.reason = str(exc)
-                    continue
 
             item.status = Status.REVISAO_INICIAL
             item.reason = ""
@@ -329,6 +370,46 @@ class BatchService:
             "action": "IGNORED" if ignore else "CPF_CORRECTED",
         }
 
+    def ignore_missing_addresses(self, batch_id: str, review_sha256: str) -> set[int]:
+        directory = self.reviews.batch_dir(batch_id)
+        if (directory / "resultado_gravacao.json").exists():
+            raise ValueError("Este lote já foi gravado e não pode mais ser alterado")
+
+        # A revisão final é a fonte exibida no lote. Salvá-la por último
+        # permite repetir a ação caso alguma cópia falhe ao ser atualizada.
+        filenames = ("revisao_planilha.json", "lote_revisado.json", "revisao_final.json")
+        snapshots = {
+            filename: self.reviews.read(batch_id, filename)
+            for filename in filenames
+            if (directory / filename).is_file()
+        }
+        current = snapshots.get("revisao_final.json", snapshots.get("revisao_planilha.json"))
+        if current is None:
+            raise ValueError("Revisão do lote não encontrada")
+        for payload in snapshots.values():
+            self.reviews.verify_hash(payload)
+            if any(payload.get(key) != current.get(key) for key in ("batch_id", "competence", "source_sha256")):
+                raise ValueError("As revisões pertencem a origens diferentes. Confira o lote.")
+        if review_sha256 != current["review_sha256"]:
+            raise ValueError("A revisão do lote mudou. Volte ao lote e confira as linhas.")
+
+        rows = rows_missing_address(current)
+        if not rows:
+            return rows
+        for payload in snapshots.values():
+            matches = [item for item in payload["items"] if item["row"] in rows]
+            if len(matches) != len(rows) or {item["row"] for item in matches} != rows:
+                raise ValueError("As linhas das revisões não coincidem. Confira o lote.")
+            for item in matches:
+                item["status"] = Status.IGNORADO_PEC.value
+                item["reason"] = "Linha ignorada pelo operador por falta de endereço."
+                item.setdefault("sources", {})["manual_review"] = "IGNORADO_SEM_ENDERECO"
+
+        (directory / "previa_firebird.json").unlink(missing_ok=True)
+        for filename, payload in snapshots.items():
+            self.update_review(batch_id, payload, filename=filename)
+        return rows
+
     def import_cids_into_pec_batch(
         self,
         batch_id: str,
@@ -360,7 +441,9 @@ class BatchService:
                 cpf = normalize_cpf(raw.get("cpf", ""))
                 if not valid_cpf(cpf):
                     raise ValueError("CPF inválido")
-                service_date = normalize_date(raw.get("service_date", ""))
+                service_date, _ = normalize_service_date(
+                    raw.get("service_date", ""), str(base.get("competence", ""))
+                )
                 professional = self.professionals.match_name(str(raw.get("professional", "")))
                 cid, warning = normalize_cid(raw_cid)
                 if warning or not cid:

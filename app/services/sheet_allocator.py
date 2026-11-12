@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from app.models import ExistingProduction, ReviewItem, Status
+from app.models import PREVIEW_CANDIDATE_STATUSES, ExistingProduction, ReviewItem, Status
 from app.services.patient_service import normalize_cpf
 
 
@@ -48,7 +48,7 @@ def allocate(items: list[ReviewItem], existing: list[ExistingProduction]) -> lis
 
     seen: dict[tuple[str, str], set[str]] = defaultdict(set)
     planned_updates: set[tuple[str, str, str, str, str, str, str]] = set()
-    candidates = [i for i in items if i.status in {Status.PEC_CONFIRMADO, Status.PRONTO_PARA_ADICIONAR, Status.CID_OMITIDO}]
+    candidates = [i for i in items if i.status in PREVIEW_CANDIDATE_STATUSES]
     candidates.sort(key=lambda i: (i.professional_cns, i.service_date, i.row))
     for item in candidates:
         ids = _identity(item.patient.cpf, item.patient.cns)
@@ -62,6 +62,13 @@ def allocate(items: list[ReviewItem], existing: list[ExistingProduction]) -> lis
             ]
             if len(exact_cpf_matches) == 1:
                 target = exact_cpf_matches[0]
+                if target.cid.strip():
+                    item.status = Status.JA_EXISTE_NO_BPA
+                    item.reason = (
+                        "Atendimento já existe no BPA com CID preenchido; o valor "
+                        "existente será preservado e nenhum campo será modificado."
+                    )
+                    continue
                 needs_cnes = target.cnes != item.cnes
                 needs_cid = bool(item.final_cid and not target.cid.strip())
                 update_key = (

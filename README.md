@@ -38,10 +38,10 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 
 1. Na página inicial, abra **Buscar sem planilha**.
 2. Informe a competência de apresentação e as datas inicial e final.
-3. Clique em **Buscar atendimentos no PEC** e faça login no PEC se solicitado.
+3. Clique em **Buscar atendimentos no PEC**. Se solicitado, entre e selecione seu acesso na janela do PEC.
 4. Mantenha a janela automatizada aberta. O sistema aplica o período, considera atendimentos em andamento, em escuta inicial e realizados, e usa somente **Visualizar atendimentos do dia**.
-5. A quantidade de páginas é lida dinamicamente do PEC. Cada avanço somente é aceito quando o número da página e o conteúdo dos resultados mudam; repetição, perda do contador ou falha de avanço interrompe a busca sem criar lote parcial.
-6. Atendimentos cuja opção **Visualizar atendimentos do dia** esteja desativada são ignorados individualmente, e a leitura continua no próximo resultado.
+5. Se a sessão cair ou a paginação falhar, o importador tenta reabrir a lista, reaplicar os filtros e retomar a leitura. Faça login novamente se o PEC pedir. A retomada usa o progresso guardado enquanto o importador estiver aberto.
+6. Se a opção **Visualizar atendimentos do dia** estiver desativada, o importador indica o item como ignorado. A busca tenta ler novamente os resumos pendentes na mesma página. Quando o resumo é do paciente do cartão, mas diverge em data ou profissional, o cartão fica pendente na revisão do lote. A gravação no BPA exige um atendimento confirmado.
 7. Ao final, o lote é criado com paciente, nascimento, data e profissional extraídos da Lista de atendimentos. O mesmo paciente com profissionais diferentes permanece em linhas distintas.
 8. No lote criado, use **Trazer CIDs da planilha** para enviar a planilha preenchida. O CID só é associado quando CPF, data do atendimento e profissional correspondem ao mesmo registro. O mesmo paciente com outro médico ou em outro dia não recebe o CID por engano.
 9. Clique em **Consultar todos no PEC** para complementar os dados pelo Cadastro individual. O cruzamento dos CIDs pode ser feito antes ou depois dessa consulta, mas sempre antes da prévia Firebird. Depois, siga a revisão, prévia e confirmação protegida já existentes.
@@ -58,6 +58,8 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 - CID é opcional, perde o ponto e é consultado em `S_CID`. CID múltiplo, ilegível ou ausente na tabela fica vazio com aviso.
 - Se o atendimento já existir, o CID só é completado quando houver correspondência única de CPF + data + profissional, o CID atual estiver vazio e a planilha trouxer um CID válido. CIDs já preenchidos nunca são substituídos.
 - CADCNS é localizado primeiro por CNS, depois CPF e nascimento, com escolha determinística pelo maior `ID_CADCNS`. Grafia diferente não bloqueia identidade confirmada. Cadastro antigo nunca é alterado.
+- O CNS do paciente é opcional. Sem um CNS válido, a prévia usa o CPF válido e o campo de CNS fica em branco no BPA.
+- Na revisão do lote, **Ignorar linhas sem endereço** marca de uma vez os atendimentos confirmados sem logradouro. A ação invalida uma prévia anterior; gere outra antes de gravar.
 - Nome, mãe, logradouro, número, complemento, bairro e e-mail respeitam os limites observados do banco. O valor completo fica na revisão e o ajuste legado gera aviso.
 - Tipo de logradouro usa `081`; Brasileira vira `010`; Carangola vira IBGE `311330`, sem aplicar esse IBGE a outra cidade.
 - O SQL de lote é CP1252, termina com quebra de linha, usa `SET BAIL ON`, transação explícita e um único `COMMIT`. Assim, qualquer erro interrompe o script antes do commit. Inclusões usam `INSERT ... WHERE NOT EXISTS`. A única atualização permitida é `S_PRD.PRD_CID` quando o campo está nulo/vazio e o atendimento foi identificado exatamente; qualquer outro `UPDATE`, todo `DELETE` e alterações de esquema são recusados pelo executor.

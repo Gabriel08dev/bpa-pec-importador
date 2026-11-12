@@ -20,6 +20,11 @@ class Status(StrEnum):
     ERRO_TECNICO = "ERRO_TECNICO"
 
 
+PREVIEW_CANDIDATE_STATUSES = frozenset(
+    {Status.PEC_CONFIRMADO, Status.CID_OMITIDO, Status.PRONTO_PARA_ADICIONAR}
+)
+
+
 @dataclass
 class Professional:
     name: str

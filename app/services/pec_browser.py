@@ -4,6 +4,7 @@ import re
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.credentials import read_credential
 from app.logging_safe import mask_identifier, sanitize
@@ -24,6 +25,15 @@ from app.services.pec_attendance import (
 from app.services.pec_filter_controls import click_action_by_text, date_range_inputs, set_checked
 from app.services.pec_page import navigate_pec, select_pec_page
 from app.services.pec_service import _graphql_value, parse_pec_detail, parse_pec_graphql
+
+
+class _PecAreaUnavailable(RuntimeError):
+    pass
+
+
+def _route(url: str) -> tuple[str, str, str]:
+    parsed = urlsplit(url)
+    return parsed.scheme, parsed.netloc, parsed.path.rstrip("/")
 
 
 def _display_date(value: str) -> str:
@@ -65,6 +75,7 @@ def consult_pec(
     na Lista de atendimentos permanece isolada e desligada por padrão, pois a
     planilha pode conter produção legítima que ainda não aparece naquela lista.
     """
+    from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
@@ -127,17 +138,12 @@ def consult_pec(
                     re.compile(r"Pesquise por nome, CPF ou data de nascimento", re.I)
                 ).first
 
-            def wait_for_search_field(timeout: int = 10000) -> bool:
-                try:
-                    search_field().wait_for(state="visible", timeout=timeout)
-                    return True
-                except PlaywrightTimeoutError:
-                    return False
+            password = page.locator("input[type='password']:visible").first
+            pec_origin = _route(service.base_url)[:2]
 
             def fill_login() -> bool:
                 credential = read_credential(service.credential_target)
-                password = page.locator("input[type='password']").first
-                if not credential or not visible(password):
+                if not credential or not visible(password) or password.input_value():
                     return False
                 username = page.locator(
                     "input[autocomplete='username'],input[name*='usuario' i],input[name*='login' i]"
@@ -157,38 +163,78 @@ def consult_pec(
 
             def open_area(path: str, ready: Callable[[], Any], label: str) -> None:
                 destination = service.base_url + path
-                navigate_pec(page, destination)
+                target_route = _route(destination)
+
+                def go_to_area() -> None:
+                    try:
+                        navigate_pec(page, destination, wait_until="commit")
+                    except PlaywrightError as exc:
+                        replacement = re.search(r'is interrupted by another navigation to "([^"]+)"', str(exc))
+                        if replacement and _route(replacement.group(1)) == target_route:
+                            # A página do PEC assumiu a navegação. Aguarde o formulário
+                            # da nova página antes de decidir se é preciso tentar de novo.
+                            return
+                        raise _PecAreaUnavailable(f"Não foi possível abrir {label} no PEC.") from exc
+
+                def authenticating() -> bool:
+                    return visible(password) or bool(
+                        re.search(r"/(?:login|autenticacao|oauth)(?:/|$)", urlsplit(page.url).path, re.I)
+                    ) or visible(page.get_by_text(
+                        re.compile(r"Escolha um acesso para continuar|^Módulo inicial$", re.I)
+                    ))
+
+                if not authenticating():
+                    go_to_area()
                 deadline = time.monotonic() + service.login_timeout / 1000
+                ready_by = time.monotonic() + service.timeout / 1000
                 attempted_login = False
-                notice_sent = False
+                waiting_for_login = False
+                redirected_to_area = False
                 while time.monotonic() < deadline:
-                    target = ready()
-                    if visible(target):
+                    if page.is_closed():
+                        raise _PecAreaUnavailable("A janela automatizada do PEC foi fechada.")
+                    current_route = _route(page.url)
+                    if current_route == target_route and visible(ready()) and not visible(password):
                         return
-                    password = page.locator("input[type='password']").first
-                    if visible(password):
-                        if not attempted_login:
-                            attempted_login = fill_login()
-                        if not notice_sent:
+                    if authenticating():
+                        if not waiting_for_login:
                             progress(
-                                "Aguardando login no PEC; após entrar, a área solicitada será aberta automaticamente"
+                                "Conclua o login e escolha seu acesso na janela do PEC, se solicitado."
                             )
-                            notice_sent = True
-                    elif "/agenda" in page.url.lower():
-                        # Só navega novamente após o PEC confirmar o login
-                        # redirecionando para a Agenda. Durante autenticação,
-                        # nenhuma página é recarregada.
-                        navigate_pec(page, destination)
-                    elif not notice_sent:
-                        progress(
-                            "Conclua o login na janela do PEC; a página não será recarregada durante a autenticação"
+                            waiting_for_login = True
+                        if not attempted_login and current_route[:2] == pec_origin and visible(password):
+                            attempted_login = True
+                            try:
+                                fill_login()
+                            except (OSError, PlaywrightError):
+                                progress("O acesso salvo não pôde ser usado. Entre manualmente na janela do PEC.")
+                    elif (
+                        not redirected_to_area
+                        and current_route != target_route
+                        and current_route[:2] == pec_origin
+                        and (
+                            current_route[2].endswith("/agenda")
+                            or page.locator(f'a[href="{path}"], a[href="{destination}"]').count() > 0
                         )
-                        notice_sent = True
-                    page.wait_for_timeout(500)
+                    ):
+                        go_to_area()
+                        redirected_to_area = True
+                        ready_by = time.monotonic() + service.timeout / 1000
+                    elif (redirected_to_area or not waiting_for_login) and time.monotonic() >= ready_by:
+                        raise _PecAreaUnavailable(f"O PEC não terminou de abrir {label}.")
+                    page.wait_for_timeout(200)
                 raise RuntimeError(f"Tempo de login no PEC esgotado ao abrir {label}")
 
             def open_citizen() -> None:
-                open_area("/cidadao", search_field, "Cadastro individual")
+                # O e-SUS PEC 5.x publicado em Carangola expõe o Cadastro
+                # individual dentro do módulo gestaoCadastros. Instalações
+                # antigas usavam /cidadao; a rota nova também mantém o nome
+                # de campo nomeCpfCns esperado abaixo.
+                open_area(
+                    "/gestaoCadastros/cadastro-individual",
+                    search_field,
+                    "Cadastro individual",
+                )
 
             def open_attendance_list() -> None:
                 open_area("/lista-atendimento", attendance_search_field, "Lista de atendimentos")
@@ -341,9 +387,7 @@ def consult_pec(
                 if key in detail_cache:
                     return detail_cache[key]
                 def search_once() -> tuple[Status, str, dict[str, Any] | None]:
-                    navigate_pec(page, service.base_url + "/cidadao")
-                    if not wait_for_search_field():
-                        open_citizen()
+                    open_citizen()
                     search_field().fill(identifier)
                     search_button = page.get_by_role(
                         "button", name=re.compile(r"Buscar (?:cadastro|cidad[aã]o)", re.I)
@@ -412,7 +456,10 @@ def consult_pec(
                     views.first.wait_for(state="visible", timeout=service.timeout)
                     views.first.click()
                     page.wait_for_url(
-                        re.compile(r"/cidadao/\d+/informacoes"), timeout=service.timeout
+                        re.compile(
+                            r"/(?:cidadao|gestaoCadastros/cadastro-individual)/\d+/informacoes"
+                        ),
+                        timeout=service.timeout,
                     )
                     deadline = time.monotonic() + service.timeout / 1000
                     while "cidadao" not in graphql_results and time.monotonic() < deadline:
@@ -429,7 +476,13 @@ def consult_pec(
                 # conferida depois nos detalhes retornados pelo PEC; usá-la
                 # como filtro aqui faria um arquivo com dia/mês invertidos
                 # ocultar um cadastro local válido.
-                result = search_once()
+                try:
+                    result = search_once()
+                except _PecAreaUnavailable:
+                    if page.is_closed():
+                        raise
+                    progress("A abertura do Cadastro individual foi interrompida. Tentando novamente.")
+                    result = search_once()
                 detail_cache[key] = result
                 return result
 

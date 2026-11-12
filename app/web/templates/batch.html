@@ -20,7 +20,7 @@
     <section class="card">
       <div class="section-heading"><div class="heading-with-step"><span class="step-number">1</span><div><h2>Fluxo do lote</h2><p>Consulte o PEC, cruze os CIDs quando necessário, gere o relatório e só então prepare a prévia.</p></div></div></div>
       <div class="flow-actions">
-        <form method="post" action="/lote/{{ payload.batch_id }}/pec"><button type="submit">Consultar todos no PEC</button></form>
+        <form method="post" action="/lote/{{ payload.batch_id }}/pec"><button type="submit">{% if pec_retry_count|default(0) %}Retomar consulta no PEC{% else %}Consultar todos no PEC{% endif %}</button></form>
         <form method="post" action="/lote/{{ payload.batch_id }}/relatorio"><button class="secondary" type="submit">Gerar relatório de divergências</button></form>
         <form method="post" action="/lote/{{ payload.batch_id }}/previa"><button type="submit">Gerar lote final e prévia Firebird</button></form>
       </div>
@@ -78,7 +78,16 @@
     {% endif %}
 
     <section class="card">
-      <div class="section-heading"><div class="heading-with-step"><span class="step-number">2</span><div><h2>Revisão dos atendimentos</h2><p>Confira o paciente localizado, profissional, data, CID e situação de cada linha.</p></div></div></div>
+      {% set address_rows = missing_address_rows|default([]) %}
+      <div class="section-heading review-heading">
+        <div class="heading-with-step"><span class="step-number">2</span><div><h2>Revisão dos atendimentos</h2><p>Confira o paciente localizado, profissional, data, CID e situação de cada linha.</p></div></div>
+        {% if address_rows and not result %}
+        <form method="post" action="/lote/{{ payload.batch_id }}/ignorar-sem-endereco">
+          <input type="hidden" name="review_sha256" value="{{ payload.review_sha256 }}">
+          <button class="secondary" type="submit">Ignorar linhas sem endereço ({{ address_rows|length }})</button>
+        </form>
+        {% endif %}
+      </div>
       <div class="table-shell">
         <table>
           <thead><tr><th>Linha</th><th>Paciente PEC</th><th>Profissional</th><th>Data</th><th>CID</th><th>Status</th><th>Motivo ou aviso</th><th>Ações</th></tr></thead>
@@ -91,7 +100,10 @@
               <td class="cell-nowrap">{{ item.service_date }}</td>
               <td class="cell-nowrap">{{ item.final_cid or '—' }}</td>
               <td><span class="status" data-status="{{ item.status }}">{{ item.status }}</span></td>
-              <td class="cell-muted">{{ item.reason }} {{ item.warnings|join('; ') }}</td>
+              <td class="cell-muted">
+                {% if item.row in address_rows %}<strong class="field-message--warning">Adicionar endereço.</strong>{% endif %}
+                {{ item.reason }} {{ item.warnings|join('; ') }}
+              </td>
               <td class="review-actions">
                 {% if item.row in invalid_cpf_rows and not result %}
                 <form class="cpf-correction-form" method="post" action="/lote/{{ payload.batch_id }}/linha/{{ item.row }}/cpf">

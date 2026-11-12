@@ -5,6 +5,7 @@ from collections import Counter
 from app.firebird.legacy_runner import LegacyRunner, parse_list_output
 from app.firebird.sql_builder import literal
 from app.models import ExistingProduction, ReviewItem
+from app.services.patient_service import normalize_service_date
 
 
 class FirebirdRepository:
@@ -43,6 +44,39 @@ QUIT;
             for row in parse_list_output(self.runner.run(sql))
         ]
 
+    def correct_swapped_service_dates(
+        self, competence: str, rows: list[ExistingProduction]
+    ) -> int:
+        """Corrige somente linhas cuja inversão dia/mês coincide com a competência."""
+        statements: list[str] = []
+        for row in rows:
+            corrected, warning = normalize_service_date(row.service_date, competence)
+            if not warning:
+                continue
+            statements.append(
+                "UPDATE S_PRD SET PRD_DTATEN={new_date} WHERE "
+                "PRD_CNSMED={professional} AND PRD_UID={cnes} AND PRD_CBO={cbo} "
+                "AND PRD_CMP={competence} AND PRD_DTATEN={old_date} "
+                "AND PRD_FLH={sheet} AND PRD_SEQ={sequence} "
+                "AND PRD_CPF_PCNTE={cpf} AND PRD_CNSPAC={cns};".format(
+                    new_date=literal(corrected),
+                    professional=literal(row.professional_cns),
+                    cnes=literal(row.cnes),
+                    cbo=literal(row.cbo),
+                    competence=literal(competence),
+                    old_date=literal(row.service_date),
+                    sheet=literal(row.sheet),
+                    sequence=literal(row.sequence),
+                    cpf=literal(row.patient_cpf),
+                    cns=literal(row.patient_cns),
+                )
+            )
+        if not statements:
+            return 0
+        sql = "SET BAIL ON;\nSET TRANSACTION;\n" + "\n".join(statements) + "\nCOMMIT;\nQUIT;\n"
+        self.runner.run(sql, allow_update=True)
+        return len(statements)
+
     def validate_cids(self, cids: list[str]) -> set[str]:
         values = sorted(set(value for value in cids if value))
         if not values: return set()
@@ -77,11 +111,14 @@ QUIT;
         statements = []
         for index, item in enumerate(items, 1):
             p = item.patient
+            cns_filter = f"C.CNS={literal(p.cns)} OR " if p.cns else ""
+            cns_priority = (
+                f"CASE WHEN C.CNS={literal(p.cns)} THEN 0 ELSE 1 END,\n         " if p.cns else ""
+            )
             statements.append(f"""SELECT FIRST 1 {index} AS ITEM_INDEX, C.ID_CADCNS AS DB_ID, C.CNS AS DB_CNS,
  C.NUM_CPF AS DB_CPF, C.DTNASC AS DB_BIRTH, C.NOME AS DB_NAME
-FROM CADCNS C WHERE C.CNS={literal(p.cns)} OR C.NUM_CPF={literal(p.cpf)}
-ORDER BY CASE WHEN C.CNS={literal(p.cns)} THEN 0 ELSE 1 END,
-         CASE WHEN C.NUM_CPF={literal(p.cpf)} THEN 0 ELSE 1 END,
+FROM CADCNS C WHERE {cns_filter}C.NUM_CPF={literal(p.cpf)}
+ORDER BY {cns_priority}CASE WHEN C.NUM_CPF={literal(p.cpf)} THEN 0 ELSE 1 END,
          CASE WHEN C.DTNASC={literal(p.birth_date)} THEN 0 ELSE 1 END, C.ID_CADCNS DESC;""")
         output = self.runner.run("SET LIST ON;\nSET TRANSACTION READ ONLY;\n" + "\n".join(statements) + "\nROLLBACK;\nQUIT;\n")
         return {int(row["ITEM_INDEX"]): row for row in parse_list_output(output) if row.get("ITEM_INDEX")}

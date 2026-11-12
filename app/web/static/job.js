@@ -8,6 +8,7 @@
   const summaryAdded = document.getElementById("summary-added");
   const summaryIgnored = document.getElementById("summary-ignored");
   const lastWarning = document.getElementById("last-warning");
+  let progressCursor = 0;
 
   function updateSummary(entries) {
     entries.forEach((entry) => {
@@ -17,13 +18,13 @@
         summaryAnalyzed.textContent = page[3];
         summaryAdded.textContent = page[4];
       }
-      const ignored = entry.match(/(\d+)\s+itens ignorados.*?último aviso:\s*(.+?)(?:\.\s*Seguindo|$)/i);
+      const ignored = entry.match(/^(\d+)\s+it(?:em|ens)\s+ignorados?\.\s*(.+)$/i);
       if (ignored) {
         summaryIgnored.textContent = ignored[1];
-        lastWarning.textContent = "Último aviso: " + ignored[2];
+        lastWarning.textContent = ignored[2];
         lastWarning.hidden = false;
       }
-      const row = entry.match(/Resumo\s+(\d+)\s+consultado;\s*(\d+)\s+atendimentos/i);
+      const row = entry.match(/^(\d+)\s+registros examinados e\s+(\d+)\s+atendimentos/i);
       if (row) {
         summaryAnalyzed.textContent = row[1];
         summaryAdded.textContent = row[2];
@@ -31,28 +32,47 @@
     });
   }
 
+  function showError(text) {
+    document.body.classList.add("error");
+    message.setAttribute("role", "alert");
+    message.textContent = text;
+  }
+
   async function poll() {
     try {
       const response = await fetch(
-        "/api/trabalho/" + encodeURIComponent(job),
+        "/api/trabalho/" + encodeURIComponent(job) + "?after=" + progressCursor,
         {cache: "no-store", credentials: "same-origin"},
       );
+      if (response.status === 403) {
+        showError("A sessão local do importador expirou. Reabra o importador para acessá-lo.");
+        return;
+      }
+      if (response.status === 404) {
+        showError("Esta operação já não está disponível nesta execução do importador.");
+        return;
+      }
+      if (!response.ok) {
+        throw new Error("Falha na consulta de progresso");
+      }
       const data = await response.json();
       const entries = Array.isArray(data.progress) ? data.progress.map(String) : [];
       message.textContent = data.message;
-      progress.replaceChildren(...entries.map((entry) => {
+      const additions = document.createDocumentFragment();
+      entries.forEach((entry) => {
         const item = document.createElement("li");
         item.textContent = entry;
-        return item;
-      }));
+        additions.appendChild(item);
+      });
+      progress.appendChild(additions);
+      progressCursor += entries.length;
       updateSummary(entries);
       if (data.status === "DONE" && data.result && data.result.redirect) {
         location.href = data.result.redirect;
         return;
       }
       if (data.status === "ERROR") {
-        document.body.classList.add("error");
-        message.setAttribute("role", "alert");
+        showError(data.message);
         return;
       }
       setTimeout(poll, 800);

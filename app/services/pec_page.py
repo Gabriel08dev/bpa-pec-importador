@@ -33,6 +33,6 @@ def select_pec_page(context: Any, base_url: str) -> Any:
     return selected
 
 
-def navigate_pec(page: Any, destination: str) -> None:
-    page.goto(destination, wait_until="domcontentloaded")
+def navigate_pec(page: Any, destination: str, *, wait_until: str = "domcontentloaded") -> None:
+    page.goto(destination, wait_until=wait_until)
     page.bring_to_front()

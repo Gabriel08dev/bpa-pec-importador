@@ -4,6 +4,7 @@ import pytest
 
 from app.services.cid_service import normalize_cid, validate_cid
 from app.services.patient_service import (format_cpf, legacy_adjust, normalize_cpf, normalize_date,
+                                          normalize_service_date,
                                           normalize_pec_patient, reconcile_birth_date,
                                           swapped_day_month_date, valid_cns, valid_cpf)
 from app.services.pec_service import _graphql_value, parse_pec_detail, parse_pec_graphql
@@ -35,6 +36,45 @@ def test_cns_valid(): assert valid_cns(_synthetic_valid_cns())
 def test_cns_invalid(): assert not valid_cns("700000000000000")
 def test_date_br(): assert normalize_date("03/07/2026") == "20260703"
 def test_date_compact(): assert normalize_date("20260703") == "20260703"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("17/12/99", "19991217"),
+        ("08/07/08", "20080708"),
+        ("12/08/2004 (", "20040812"),
+        ("12/08/2004 (21 anos)", "20040812"),
+        ("16/092026", "20260916"),
+        ("11/092026", "20260911"),
+    ],
+)
+def test_brazilian_date_with_short_year_or_exported_suffix(value, expected):
+    assert normalize_date(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("20260708", "20260807"),
+        ("20261208", "20260812"),
+        ("20260308", "20260803"),
+        ("20261008", "20260810"),
+    ],
+)
+def test_service_date_swaps_day_month_only_to_match_competence(value, expected):
+    normalized, warning = normalize_service_date(value, "202608")
+    assert normalized == expected
+    assert "invertidos" in warning
+
+
+def test_service_date_inside_competence_is_not_changed():
+    assert normalize_service_date("07/08/2026", "202608") == ("20260807", "")
+
+
+def test_service_date_outside_competence_without_safe_swap_is_rejected():
+    with pytest.raises(ValueError, match="fora da competência"):
+        normalize_service_date("15/07/2026", "202608")
 
 
 @pytest.mark.parametrize("value", [45881, 45881.0, "45881", "45881.0"])

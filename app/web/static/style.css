@@ -530,6 +530,8 @@ button:disabled,
 
 .section-heading p { margin: 5px 0 0; color: var(--muted); font-size: .92rem; }
 
+.review-heading { flex-wrap: wrap; }
+
 .step-number {
   display: inline-grid;
   place-items: center;

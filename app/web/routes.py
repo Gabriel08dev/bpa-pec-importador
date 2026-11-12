@@ -19,7 +19,7 @@ from app.models import ReviewItem, Status
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.firebird_repository import FirebirdRepository
 from app.repositories.review_repository import ReviewRepository
-from app.services.batch_service import BatchService, validate_competence
+from app.services.batch_service import BatchService, rows_missing_address, validate_competence
 from app.services.dashboard_service import environment_summary, recent_batches
 from app.services.divergence_service import generate_ignored_csv, generate_pdf
 from app.services.firebird_workflow import FirebirdWorkflow
@@ -32,6 +32,8 @@ from app.services.spreadsheet_service import create_template
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 JOBS: dict[str, dict[str, Any]] = {}
+PEC_JOB_KINDS = {"PEC_DISCOVERY", "PEC_CONSULT"}
+JOB_START_LOCK = threading.Lock()
 def services(request: Request): return request.app.state.services
 
 
@@ -48,6 +50,26 @@ def start_job(label: str, action, kind: str = "") -> str:
     return job_id
 
 
+def pec_job_running() -> bool:
+    return any(
+        job.get("status") == "RUNNING" and job.get("kind") in PEC_JOB_KINDS
+        for job in tuple(JOBS.values())
+    )
+
+
+def start_pec_job(request: Request, label: str, action, kind: str):
+    with JOB_START_LOCK:
+        if pec_job_running():
+            return templates.TemplateResponse(
+                request,
+                "error.html",
+                {"message": "Já existe uma busca em andamento no PEC. Aguarde a conclusão."},
+                status_code=409,
+            )
+        job_id = start_job(label, action, kind=kind)
+    return RedirectResponse(f"/trabalho/{job_id}", status_code=303)
+
+
 @router.get("/health")
 def health(): return {"status":"ok"}
 
@@ -55,10 +77,7 @@ def health(): return {"status":"ok"}
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     svc = services(request)
-    pec_running = any(
-        job.get("status") == "RUNNING" and job.get("kind") == "PEC_DISCOVERY"
-        for job in JOBS.values()
-    )
+    pec_running = pec_job_running()
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -130,17 +149,6 @@ def import_from_pec_list(
             {"message": str(exc)},
             status_code=400,
         )
-    if any(
-        job.get("status") == "RUNNING" and job.get("kind") == "PEC_DISCOVERY"
-        for job in JOBS.values()
-    ):
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {"message": "Já existe uma busca em andamento."},
-            status_code=409,
-        )
-
     def action(progress):
         records = svc["pec"].discover(start_date, end_date, progress)
         batch_id, payload = svc["batch"].import_pec_attendances(
@@ -153,8 +161,7 @@ def import_from_pec_list(
         )
         return {"redirect": f"/lote/{batch_id}"}
 
-    job = start_job("Buscando atendimentos diretamente no PEC", action, kind="PEC_DISCOVERY")
-    return RedirectResponse(f"/trabalho/{job}", status_code=303)
+    return start_pec_job(request, "Buscando atendimentos diretamente no PEC", action, "PEC_DISCOVERY")
 
 
 @router.get("/lote/{batch_id}", response_class=HTMLResponse)
@@ -169,6 +176,8 @@ def batch_view(request: Request, batch_id: str):
     preview = None; result = None
     try: preview = svc["reviews"].read(batch_id, "previa_firebird.json")
     except FileNotFoundError: pass
+    if preview and preview.get("based_on_review_sha256") != payload.get("review_sha256"):
+        preview = None
     try: result = svc["reviews"].read(batch_id, "resultado_gravacao.json")
     except FileNotFoundError: pass
     invalid_cpf_rows = {
@@ -184,8 +193,40 @@ def batch_view(request: Request, batch_id: str):
             "preview": preview,
             "result": result,
             "invalid_cpf_rows": invalid_cpf_rows,
+            "missing_address_rows": rows_missing_address(payload),
+            "pec_retry_count": sum(
+                item.get("status") == Status.ERRO_TECNICO for item in payload.get("items", [])
+            ),
         },
     )
+
+
+@router.post("/lote/{batch_id}/ignorar-sem-endereco")
+def ignore_batch_missing_addresses(request: Request, batch_id: str, review_sha256: str = Form(...)):
+    svc = services(request)
+    try:
+        with JOB_START_LOCK:
+            if pec_job_running() or any(
+                job.get("status") == "RUNNING" and job.get("kind") == "FIREBIRD_WRITE"
+                for job in tuple(JOBS.values())
+            ):
+                raise ValueError("Aguarde a conclusão da consulta ao PEC ou da gravação em andamento.")
+            rows = svc["batch"].ignore_missing_addresses(batch_id, review_sha256)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        return templates.TemplateResponse(
+            request,
+            "error.html",
+            {
+                "title": "Não foi possível ignorar as linhas sem endereço",
+                "message": str(exc),
+                "return_url": f"/lote/{batch_id}",
+                "return_label": "Voltar ao lote",
+            },
+            status_code=400,
+        )
+    if rows:
+        svc["audit"].record(batch_id, "BATCH_MISSING_ADDRESSES_IGNORED", {"rows": sorted(rows)})
+    return RedirectResponse(f"/lote/{batch_id}", status_code=303)
 
 
 @router.post("/lote/{batch_id}/linha/{row}/cpf")
@@ -298,38 +339,70 @@ async def import_batch_cids(
 def consult_pec(request: Request, batch_id: str):
     svc = services(request)
     def action(progress):
-        payload = svc["reviews"].read(batch_id, "revisao_planilha.json")
-        svc["reviews"].verify_hash(payload)
-        payload, resolved_professionals = (
-            svc["batch"].resolve_newly_registered_professionals(payload)
-        )
-        if resolved_professionals:
-            payload = svc["batch"].update_review(
-                batch_id,
-                payload,
-                filename="revisao_planilha.json",
-            )
-        items = [ReviewItem.from_dict(item) for item in payload["items"]]
+        reviews = svc["reviews"]
+        base = reviews.read(batch_id, "revisao_planilha.json")
+        reviews.verify_hash(base)
+        try:
+            previous = reviews.read(batch_id, "revisao_final.json")
+        except FileNotFoundError:
+            previous = None
+        retry_rows = {
+            item["row"]
+            for item in (previous or {}).get("items", [])
+            if item["status"] == Status.ERRO_TECNICO
+        }
+        resolved_professionals = 0
+        if retry_rows:
+            reviews.verify_hash(previous)
+            if any(previous.get(key) != base.get(key) for key in ("batch_id", "competence", "source_sha256")):
+                raise ValueError("A revisão anterior pertence a outra origem. Confira o lote antes de retomar.")
+            if [item["row"] for item in previous["items"]] != [item["row"] for item in base["items"]]:
+                raise ValueError("As linhas do lote mudaram. Confira a revisão antes de retomar.")
+            payload = previous
+            items = [
+                ReviewItem.from_dict(item) for item in base["items"] if item["row"] in retry_rows
+            ]
+            progress(f"Retomando {len(items)} linhas que tiveram falha na consulta ao PEC.")
+        else:
+            payload, resolved_professionals = svc["batch"].resolve_newly_registered_professionals(base)
+            if resolved_professionals:
+                payload = svc["batch"].update_review(
+                    batch_id,
+                    payload,
+                    filename="revisao_planilha.json",
+                )
+            items = [ReviewItem.from_dict(item) for item in payload["items"]]
         # A planilha (ou o lote descoberto) define os atendimentos. Aqui o PEC
         # é usado somente para completar/confirmar a identidade cadastral.
         svc["pec"].consult(items, progress, validate_attendance=False)
         for item in items:
             if item.status == Status.PEC_CONFIRMADO and item.original_cid and not item.final_cid:
                 item.status = Status.CID_OMITIDO
-        payload["items"] = [item.to_dict() for item in items]
+        if retry_rows:
+            current = reviews.read(batch_id, "revisao_final.json")
+            current_base = reviews.read(batch_id, "revisao_planilha.json")
+            if (
+                current.get("review_sha256") != previous.get("review_sha256")
+                or current_base.get("review_sha256") != base.get("review_sha256")
+            ):
+                raise ValueError("A revisão do lote mudou durante a consulta. Abra o lote e tente novamente.")
+            retried = {item.row: item.to_dict() for item in items}
+            payload["items"] = [retried.get(item["row"], item) for item in payload["items"]]
+        else:
+            payload["items"] = [item.to_dict() for item in items]
         updated = svc["batch"].update_review(batch_id, payload)
         svc["reviews"].write(batch_id, "lote_revisado.json", updated)
         svc["audit"].record(
             batch_id,
             "PEC_CONSULTED",
             {
-                "items": len(items),
+                "items": len(payload["items"]),
                 "newly_registered_professionals": resolved_professionals,
+                "retried_rows": len(retry_rows),
             },
         )
         return {"redirect":f"/lote/{batch_id}"}
-    job = start_job("Consultando o PEC", action)
-    return RedirectResponse(f"/trabalho/{job}", status_code=303)
+    return start_pec_job(request, "Consultando o PEC", action, "PEC_CONSULT")
 
 
 @router.post("/lote/{batch_id}/relatorio")
@@ -374,7 +447,8 @@ def write(request: Request, batch_id: str, confirmation: str = Form(...)):
         result = svc["workflow"].write(batch_id, confirmation)
         progress("Verificando cada registro após o COMMIT")
         return {"redirect":f"/lote/{batch_id}","write_result":result}
-    job = start_job("Preparando gravação protegida", action)
+    with JOB_START_LOCK:
+        job = start_job("Preparando gravação protegida", action, kind="FIREBIRD_WRITE")
     return RedirectResponse(f"/trabalho/{job}", status_code=303)
 
 
@@ -385,9 +459,11 @@ def job_page(request: Request, job_id: str):
 
 
 @router.get("/api/trabalho/{job_id}")
-def job_status(job_id: str):
+def job_status(job_id: str, after: int = 0):
     if job_id not in JOBS: raise HTTPException(404, "Trabalho não encontrado")
-    return JSONResponse(JOBS[job_id])
+    job = JOBS[job_id].copy()
+    job["progress"] = job["progress"][max(after, 0):]
+    return JSONResponse(job)
 
 
 @router.post("/credenciais/firebird")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
 from app.firebird.legacy_runner import FirebirdError, LegacyRunner, normalize_sql
+from app.config import Settings
 from app.firebird.sql_builder import build_insert_script, build_write_script, professional_inserts
 from app.firebird.verifier import verify_write_output
 from app.logging_safe import mask_identifier, sanitize
@@ -27,12 +29,38 @@ def test_write_script_bails_before_commit_on_any_statement_error():
     sql = build_insert_script([ready_item()], "202607").upper()
     assert "SET BAIL ON;" in sql
     assert sql.index("SET BAIL ON;") < sql.index("SET TRANSACTION;") < sql.index("COMMIT;")
+
+
+def test_runner_allows_exact_service_date_correction_only_when_authorized():
+    sql = (
+        "UPDATE S_PRD SET PRD_DTATEN='20260807' WHERE "
+        "PRD_CNSMED='700000000000006' AND PRD_UID='4998782' "
+        "AND PRD_CBO='225250' AND PRD_CMP='202608' "
+        "AND PRD_DTATEN='20260708' AND PRD_FLH='001' AND PRD_SEQ='01' "
+        "AND PRD_CPF_PCNTE='52998224725';"
+    )
+    LegacyRunner._validate_cid_updates(sql, allow_update=True)
 def test_production_uses_not_exists(): assert "NOT EXISTS" in build_insert_script([ready_item()],"202607")
 def test_production_duplicate_guard_uses_patient_professional_and_exact_date():
     sql=build_insert_script([ready_item()],"202607")
     assert "P.PRD_CNSMED='700000000000006'" in sql
     assert "P.PRD_DTATEN='20260701'" in sql
     assert "P.PRD_CPF_PCNTE='52998224725' OR P.PRD_CNSPAC='700000000000006'" in sql
+
+
+def test_write_for_patient_without_cns_uses_blank_storage_but_only_cpf_as_identity():
+    row = ready_item()
+    row.patient.cns = ""
+    write, verify = build_insert_script([row], "202607").split("COMMIT;")
+    assert "SELECT '','PACIENTE SINTETICO'" in write
+    assert "'0301010072','','PACIENTE SINTETICO'" in write
+    assert "FROM CADCNS WHERE NUM_CPF='52998224725'" in write
+    assert "P.PRD_CPF_PCNTE='52998224725'" in write
+    assert "P.PRD_CNSPAC=" not in write
+    assert "PRD_CNSMED='700000000000006'" in verify
+    assert "PRD_CPF_PCNTE='52998224725' AND PRD_CNSPAC=''" in verify
+
+
 def test_production_uses_bpi_origin_and_verifies_visibility():
     sql = build_insert_script([ready_item()], "202607")
     assert "'BPI'" in sql and "PRD_ORG='BPI'" in sql
@@ -49,7 +77,7 @@ def test_runner_blocks_update_before_credentials(tmp_path):
 
 def test_runner_rejects_broad_update_even_when_update_flag_is_enabled(tmp_path):
     runner=LegacyRunner(tmp_path/"none.exe","db","target")
-    with pytest.raises(FirebirdError, match="somente CNES/folha/sequência e CID"):
+    with pytest.raises(FirebirdError, match="somente CNES/folha/sequência, CID e data"):
         runner.run(
             "UPDATE S_PRD SET PRD_NMPAC='X' WHERE PRD_CPF_PCNTE='52998224725';",
             allow_update=True,
@@ -186,3 +214,9 @@ def test_existing_production_reads_every_origin_for_duplicate_detection():
     where_clause=runner.sql.split("FROM S_PRD",1)[1]
     assert "PRD_CMP='202607'" in where_clause
     assert "PRD_ORG" not in where_clause
+
+def test_settings_locates_an_existing_firebird_client_when_installed():
+    settings = Settings.load()
+    if Path(r"C:\Program Files (x86)\Firebird\Firebird_1_5\bin\isql.exe").is_file():
+        assert settings.helper_query.is_file()
+        assert settings.helper_query.name.lower() in {"fb_query.exe", "isql.exe"}

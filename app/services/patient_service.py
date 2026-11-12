@@ -51,6 +51,31 @@ def normalize_date(value: Any) -> str:
     if isinstance(value, date):
         return value.strftime("%Y%m%d")
     text = str(value).strip()
+    # Algumas planilhas exibem anos com dois algarismos e podem acrescentar
+    # uma observação entre parênteses ao valor exportado. Converta esse formato
+    # explicitamente para evitar depender da interpretação regional do Excel.
+    short_br = re.fullmatch(
+        r"(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?:\s*\(.*)?",
+        text,
+    )
+    if short_br:
+        day, month, raw_year = short_br.groups()
+        year = int(raw_year)
+        if len(raw_year) == 2:
+            year += 2000 if year <= 68 else 1900
+        try:
+            return datetime(year, int(month), int(day)).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    # Algumas exportações removem somente a barra entre mês e ano
+    # (ex.: 16/092026). A largura fixa torna a recuperação inequívoca.
+    missing_year_separator = re.fullmatch(r"(\d{1,2})/(\d{2})(\d{4})", text)
+    if missing_year_separator:
+        day, month, year = missing_year_separator.groups()
+        try:
+            return datetime(int(year), int(month), int(day)).strftime("%Y%m%d")
+        except ValueError:
+            pass
     for pattern in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             return datetime.strptime(text, pattern).strftime("%Y%m%d")
@@ -86,6 +111,26 @@ def normalize_date(value: Any) -> str:
     except ValueError:
         pass
     raise ValueError(f"Data inválida: {text}")
+
+
+def normalize_service_date(value: Any, competence: str) -> tuple[str, str]:
+    """Normaliza atendimento e usa a competência para desfazer dia/mês trocados."""
+    normalized = normalize_date(value)
+    if len(competence) != 6 or not competence.isdigit():
+        raise ValueError("Competência inválida ao conferir a data do atendimento")
+    if normalized[:6] == competence:
+        return normalized, ""
+    swapped = swapped_day_month_date(normalized)
+    if swapped and swapped[:6] == competence:
+        return (
+            swapped,
+            "Dia e mês do atendimento vieram invertidos no arquivo exportado; "
+            "data ajustada pela competência",
+        )
+    raise ValueError(
+        "Data do atendimento fora da competência: "
+        f"{normalized[6:8]}/{normalized[4:6]}/{normalized[:4]}"
+    )
 
 
 def reconcile_birth_date(informed: Any, returned_by_pec: Any) -> tuple[str, str]:

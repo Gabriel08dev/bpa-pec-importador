@@ -20,7 +20,7 @@ ALLOWED_PRODUCTION_UPDATE = re.compile(
     re.I | re.S,
 )
 ALLOWED_ASSIGNMENT = re.compile(
-    r"\A\s*(PRD_UID|PRD_FLH|PRD_SEQ|PRD_CID)\s*=\s*'(?:[^']|'')+'\s*\Z",
+    r"\A\s*(PRD_UID|PRD_FLH|PRD_SEQ|PRD_CID|PRD_DTATEN)\s*=\s*'(?:[^']|'')+'\s*\Z",
     re.I,
 )
 
@@ -64,7 +64,7 @@ class LegacyRunner:
             )
             if not match or any(token not in where_compact for token in required):
                 raise FirebirdError(
-                    "UPDATE recusado: somente CNES/folha/sequência e CID podem ser "
+                    "UPDATE recusado: somente CNES/folha/sequência, CID e data podem ser "
                     "corrigidos com identificação exata do atendimento"
                 )
             assignments = [part.strip() for part in match.group("set").split(",")]
@@ -113,6 +113,11 @@ class LegacyRunner:
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(normalize_sql(sql).encode("cp1252", errors="strict"))
+            if not self.executable.is_file():
+                raise FirebirdError(
+                    "Cliente Firebird não encontrado. Instale o Firebird 1.5 "
+                    "ou restaure firebird/bin/fb_query.exe."
+                )
             completed = subprocess.run([str(self.executable), self.database, "-i", name], capture_output=True, env=env,
                                        timeout=timeout, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             stdout = completed.stdout.decode("cp1252", errors="replace")

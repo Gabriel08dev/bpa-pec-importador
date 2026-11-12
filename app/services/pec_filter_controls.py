@@ -86,7 +86,12 @@ def date_range_inputs(page: Any, visible) -> list[Any]:
         placeholder = field.get_attribute("placeholder") or ""
         aria_label = field.get_attribute("aria-label") or ""
         descriptor = canonical(f"{placeholder} {aria_label}")
-        if re.fullmatch(r"\d{2}/\d{2}/\d{4}", value) or "DD MM" in descriptor or "DATA" in descriptor:
+        if (
+            field.get_attribute("type") == "date"
+            or re.fullmatch(r"\d{2}/\d{2}/\d{4}", value)
+            or "DD MM" in descriptor
+            or "DATA" in descriptor
+        ):
             candidates.append(field)
     return candidates if len(candidates) == 2 else []
 

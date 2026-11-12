@@ -37,6 +37,22 @@ def test_excel_serial_birth_date_is_normalized_when_importing_batch(tmp_path):
     assert item["informed_birth"]=="20250812"
 
 
+def test_import_swaps_service_day_month_when_only_swap_matches_competence(tmp_path):
+    path=tmp_path/"swapped-service-date.xlsx"; book=Workbook(); sheet=book.active
+    sheet.append(HEADERS)
+    sheet.append(["Ana Profissional Exemplo","08/07/2026",52998224725,"01/02/2000","B86"])
+    book.save(path)
+    root=Path(__file__).parents[1]
+    service=BatchService(
+        ProfessionalRegistry(root/"data"/"profissionais.example.json"),
+        ReviewRepository(tmp_path/"outputs"),
+    )
+    _,payload=service.import_spreadsheet(path,"202608")
+    item=payload["items"][0]
+    assert item["service_date"]=="20260807"
+    assert any("invertidos" in warning for warning in item["warnings"])
+
+
 def test_numeric_compact_brazilian_birth_date_is_normalized(tmp_path):
     path=tmp_path/"compact-date.xlsx"; book=Workbook(); sheet=book.active
     sheet.append(HEADERS)
@@ -239,6 +255,77 @@ def test_newly_registered_spreadsheet_professional_resumes_field_normalization(t
     assert item["final_cid"] == "I10"
     assert item["status"] == "REVISAO_INICIAL"
     assert item["sources"]["professional"] == "LISTA_CEAE"
+
+
+def test_spreadsheet_date_error_is_revalidated_after_normalizer_update(tmp_path):
+    root = Path(__file__).parents[1]
+    service = BatchService(
+        ProfessionalRegistry(root / "data" / "profissionais.example.json"),
+        ReviewRepository(tmp_path / "outputs"),
+    )
+    payload = {
+        "origin": str(tmp_path / "atendimentos.xlsx"),
+        "competence": "202608",
+        "items": [{
+            "row": 325,
+            "original_identifier": "529.982.247-25",
+            "professional_name": "Ana Profissional Exemplo",
+            "professional_cns": "",
+            "cbo": "",
+            "cnes": "",
+            "procedure": "",
+            "service_date": "26/08/2026",
+            "informed_birth": "17/12/99",
+            "original_cid": "Z34",
+            "patient": {},
+            "status": "AGUARDANDO_CONFIRMACAO",
+            "reason": "Data inválida: 17/12/99",
+            "sources": {},
+        }],
+    }
+
+    updated, resolved = service.resolve_newly_registered_professionals(payload)
+
+    assert resolved == 1
+    assert updated["items"][0]["patient"]["birth_date"] == "19991217"
+    assert updated["items"][0]["status"] == "REVISAO_INICIAL"
+
+
+def test_partially_resolved_spreadsheet_line_is_revalidated_atomically(tmp_path):
+    root = Path(__file__).parents[1]
+    service = BatchService(
+        ProfessionalRegistry(root / "data" / "profissionais.example.json"),
+        ReviewRepository(tmp_path / "outputs"),
+    )
+    payload = {
+        "origin": str(tmp_path / "atendimentos.xlsx"),
+        "competence": "202609",
+        "items": [{
+            "row": 42,
+            "original_identifier": "529.982.247-25",
+            "professional_name": "Ana Profissional Exemplo",
+            "professional_cns": "700000000000005",
+            "cbo": "223505",
+            "cnes": "4998782",
+            "procedure": "0301010048",
+            "service_date": "16/092026",
+            "informed_birth": "17/12/99",
+            "original_cid": "Z34",
+            "patient": {},
+            "status": "AGUARDANDO_CONFIRMACAO",
+            "reason": "Data inválida: 16/092026",
+            "sources": {},
+        }],
+    }
+
+    updated, resolved = service.resolve_newly_registered_professionals(payload)
+
+    item = updated["items"][0]
+    assert resolved == 1
+    assert item["service_date"] == "20260916"
+    assert item["patient"]["birth_date"] == "19991217"
+    assert item["status"] == "REVISAO_INICIAL"
+    assert item["reason"] == ""
 
 
 def test_operator_can_correct_missing_cpf_or_ignore_line_before_preview(tmp_path):

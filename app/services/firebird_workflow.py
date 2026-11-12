@@ -15,12 +15,12 @@ from app.firebird.sql_builder import (
     build_write_script,
 )
 from app.firebird.verifier import verify_write_output
-from app.models import ReviewItem, Status
+from app.models import PREVIEW_CANDIDATE_STATUSES, ReviewItem, Status
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.firebird_repository import FirebirdRepository
 from app.repositories.review_repository import ReviewRepository
 from app.services.batch_service import BatchService
-from app.services.patient_service import valid_cns, valid_cpf
+from app.services.patient_service import digits, valid_cns, valid_cpf
 from app.services.sheet_allocator import allocate
 
 
@@ -46,7 +46,7 @@ class FirebirdWorkflow:
     def preview(self, batch_id: str) -> dict:
         payload = self._load_final(batch_id)
         items = _items(payload)
-        candidates = [item for item in items if item.status in {Status.PEC_CONFIRMADO, Status.CID_OMITIDO, Status.PRONTO_PARA_ADICIONAR}]
+        candidates = [item for item in items if item.status in PREVIEW_CANDIDATE_STATUSES]
         if not candidates: raise ValueError("Nenhum item confirmado pelo PEC está apto à prévia")
         if self.target_cnes:
             for item in candidates:
@@ -54,6 +54,9 @@ class FirebirdWorkflow:
                 item.create_professional_if_missing = True
         inspect(self.runner)
         self._validate_items(candidates)
+        for item in candidates:
+            cns = digits(item.patient.cns)
+            item.patient.cns = cns if valid_cns(cns) else ""
         valid_cids = self.repository.validate_cids([item.final_cid for item in candidates])
         for item in candidates:
             if item.final_cid and item.final_cid not in valid_cids:
@@ -66,7 +69,7 @@ class FirebirdWorkflow:
             if match:
                 item.sources["cadcns_match"] = match.get("DB_ID", "")
                 if match.get("DB_NAME", "").strip().upper() != item.patient.name.strip().upper():
-                    item.warnings.append("Grafia do nome difere do CADCNS; identidade confirmada por CNS/CPF/nascimento e cadastro antigo preservado")
+                    item.warnings.append("Grafia do nome difere do CADCNS; cadastro antigo preservado")
                 if match.get("DB_BIRTH") and match.get("DB_BIRTH") != item.patient.birth_date:
                     item.warnings.append("Nascimento do CADCNS diverge do PEC; cadastro antigo preservado, dados PEC usados somente na nova produção")
         existing = self.repository.existing_production(payload["competence"], [item.professional_cns for item in candidates])
@@ -228,7 +231,6 @@ class FirebirdWorkflow:
         errors = []
         for item in items:
             if not valid_cpf(item.patient.cpf): errors.append(f"linha {item.row}: CPF não confirmado")
-            if not valid_cns(item.patient.cns): errors.append(f"linha {item.row}: CNS não confirmado")
             if len(item.patient.birth_date) != 8: errors.append(f"linha {item.row}: nascimento ausente")
             if not item.patient.name: errors.append(f"linha {item.row}: nome PEC ausente")
         if errors: raise ValueError("; ".join(errors))
