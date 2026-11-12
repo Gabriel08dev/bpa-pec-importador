@@ -31,6 +31,7 @@ class Settings:
     credential_pec: str = "BPA_PEC_IMPORTADOR_PEC"
     outputs: Path = ROOT / "outputs"
     backups: Path = ROOT / "backups"
+    backup_keep: int = 5
     profile: Path = ROOT / ".pec_profile"
     helper_query: Path = _firebird_tool("fb_query.exe", "isql.exe")
     helper_backup: Path = _firebird_tool("fb_backup.exe", "gbak.exe")
@@ -38,12 +39,13 @@ class Settings:
     config_file: Path = ROOT / "data" / "config.json"
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls, config_file: Path | None = None) -> "Settings":
         base = cls()
-        if not base.config_file.exists():
+        config_file = config_file or base.config_file
+        if not config_file.exists():
             return base
-        raw = json.loads(base.config_file.read_text(encoding="utf-8"))
-        allowed = {"database", "bpa_executable", "pec_url", "ceae_cnes"}
+        raw = json.loads(config_file.read_text(encoding="utf-8"))
+        allowed = {"database", "bpa_executable", "pec_url", "ceae_cnes", "backups_manter"}
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError("Configuração contém chaves não permitidas: " + ", ".join(sorted(unknown)))
@@ -52,11 +54,15 @@ class Settings:
         ceae_cnes = str(raw.get("ceae_cnes", "")).strip()
         if ceae_cnes and (not ceae_cnes.isdigit() or len(ceae_cnes) != 7):
             raise ValueError("CNES do CEAE deve conter exatamente 7 dígitos")
+        backup_keep = raw.get("backups_manter", base.backup_keep)
+        if isinstance(backup_keep, bool) or not isinstance(backup_keep, int) or not 1 <= backup_keep <= 50:
+            raise ValueError("backups_manter deve ser um número inteiro entre 1 e 50")
         return cls(
             database=str(raw.get("database", base.database)),
             bpa_executable=Path(raw.get("bpa_executable", base.bpa_executable)),
             pec_url=str(raw.get("pec_url", base.pec_url)).rstrip("/"),
             ceae_cnes=ceae_cnes,
+            backup_keep=backup_keep,
         )
 
     def prepare(self) -> None:

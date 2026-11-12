@@ -112,4 +112,12 @@ def environment_summary(backups: Path, pec_running: bool) -> list[dict[str, str]
                 "tone": "neutral",
             }
         )
+        total_mb = sum(path.stat().st_size for path in backup_files) / (1024 * 1024)
+        statuses.append(
+            {
+                "label": "Backups guardados",
+                "value": f"{len(backup_files)} · {total_mb:,.0f} MB".replace(",", "."),
+                "tone": "neutral",
+            }
+        )
     return statuses

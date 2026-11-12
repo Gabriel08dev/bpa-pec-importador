@@ -493,4 +493,4 @@ def build_services(settings: Settings) -> dict[str, Any]:
     return {"settings":settings,"professionals":professionals,"reviews":reviews,"audit":audit,
             "batch":BatchService(professionals,reviews),
             "pec":PecService(settings.pec_url,str(settings.profile),settings.credential_pec),
-            "workflow":FirebirdWorkflow(reviews,audit,runner,repository,settings.helper_backup,settings.backups,settings.credential_firebird,settings.database,settings.ceae_cnes)}
+            "workflow":FirebirdWorkflow(reviews,audit,runner,repository,settings.helper_backup,settings.backups,settings.credential_firebird,settings.database,settings.ceae_cnes,settings.backup_keep)}
