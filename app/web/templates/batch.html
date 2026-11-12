@@ -157,6 +157,8 @@
       <div class="result-line"><span class="result-mark" aria-hidden="true">✓</span><strong>{{ result.status }} · {{ result.verified|default(result.inserted) }}/{{ result.expected }} operações verificadas.</strong></div>
       <p>{{ result.inserted }} atendimento(s) novo(s) incluído(s) · {{ result.corrected_cnes|default(0) }} registro(s) corrigido(s) para o CNES do CEAE · {{ result.updated_cids|default(0) }} CID(s) ausente(s) completado(s).</p>
       {% if result.failures %}<ul>{% for failure in result.failures %}<li>{{ failure }}</li>{% endfor %}</ul>{% endif %}
+      {% if result.backups_removed %}<p>{{ result.backups_removed|length }} backup(s) antigo(s) apagado(s); os mais recentes foram mantidos.</p>{% endif %}
+      {% if result.backup_warnings %}<ul>{% for warning in result.backup_warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}
       <p>Próximo passo: abra o BPA Magnético, execute a consistência e exporte a remessa pelo próprio BPA.</p>
     </section>
     {% endif %}

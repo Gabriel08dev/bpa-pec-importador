@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
-from app.firebird.backup import create_backup
+from app.firebird.backup import DEFAULT_BACKUP_KEEP, create_backup, prune_backups
 from app.firebird.legacy_runner import LegacyRunner
 from app.firebird.schema_inspector import inspect
 from app.firebird.sql_builder import (
@@ -38,10 +38,11 @@ def _items(payload: dict) -> list[ReviewItem]:
 class FirebirdWorkflow:
     def __init__(self, reviews: ReviewRepository, audit: AuditRepository, runner: LegacyRunner, repository: FirebirdRepository,
                  helper_backup: Path, backups: Path, credential_target: str, database: str,
-                 target_cnes: str = ""):
+                 target_cnes: str = "", backup_keep: int = DEFAULT_BACKUP_KEEP):
         self.reviews = reviews; self.audit = audit; self.runner = runner; self.repository = repository
         self.helper_backup = helper_backup; self.backups = backups; self.credential_target = credential_target; self.database = database
         self.target_cnes = target_cnes
+        self.backup_keep = backup_keep
 
     def preview(self, batch_id: str) -> dict:
         payload = self._load_final(batch_id)
@@ -204,6 +205,13 @@ class FirebirdWorkflow:
             "manifest_before": manifest_before,
             "manifest_after": manifest_after,
         }
+        if not failures:
+            # Só limpa backups antigos depois de uma gravação totalmente verificada;
+            # com qualquer falha, todos os backups são preservados para análise.
+            removed, backup_warnings = prune_backups(self.backups, self.backup_keep, backup)
+            result["backups_removed"] = removed
+            if backup_warnings:
+                result["backup_warnings"] = backup_warnings
         self.reviews.write(batch_id, "resultado_gravacao.json", result)
         self.audit.record(
             batch_id,
@@ -214,6 +222,7 @@ class FirebirdWorkflow:
                 "updated_cids": result["updated_cids"],
                 "corrected_cnes": result["corrected_cnes"],
                 "backup": backup.name,
+                "backups_removed": result.get("backups_removed", []),
             },
         )
         return result

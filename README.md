@@ -62,7 +62,7 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 - Na revisão do lote, **Ignorar linhas sem endereço** marca de uma vez os atendimentos confirmados sem logradouro. A ação invalida uma prévia anterior; gere outra antes de gravar.
 - Nome, mãe, logradouro, número, complemento, bairro e e-mail respeitam os limites observados do banco. O valor completo fica na revisão e o ajuste legado gera aviso.
 - Tipo de logradouro usa `081`; Brasileira vira `010`; Carangola vira IBGE `311330`, sem aplicar esse IBGE a outra cidade.
-- O SQL de lote é CP1252, termina com quebra de linha, usa `SET BAIL ON`, transação explícita e um único `COMMIT`. Assim, qualquer erro interrompe o script antes do commit. Inclusões usam `INSERT ... WHERE NOT EXISTS`. A única atualização permitida é `S_PRD.PRD_CID` quando o campo está nulo/vazio e o atendimento foi identificado exatamente; qualquer outro `UPDATE`, todo `DELETE` e alterações de esquema são recusados pelo executor.
+- O SQL de lote é CP1252, termina com quebra de linha, usa `SET BAIL ON`, transação explícita e um único `COMMIT`. Assim, qualquer erro interrompe o script antes do commit. Inclusões usam `INSERT ... WHERE NOT EXISTS`. O executor só aceita `UPDATE` em `S_PRD`, com o atendimento identificado exatamente (profissional, CNES, CBO, competência, data, folha, sequência e CPF), e somente nestes campos: `PRD_CID`, apenas quando o campo está nulo/vazio, sem nunca sobrescrever um CID existente; `PRD_UID`, `PRD_FLH` e `PRD_SEQ`, sempre juntos, para corrigir o CNES com nova folha e sequência; e `PRD_DTATEN`, para corrigir datas com dia e mês invertidos que caem na competência. Qualquer outro `UPDATE`, todo `DELETE` e alterações de esquema são recusados pelo executor.
 - Retry lê novamente o banco, classifica itens já existentes e tenta somente os pendentes.
 
 ## Arquivos do lote
@@ -70,6 +70,8 @@ Também é possível usar `ABRIR_IMPORTADOR.cmd`. Para instalar OCR: `powershell
 Cada lote fica em `outputs/<id-do-lote>/` e pode conter `revisao_planilha.json`, `revisao_final.json`, `lote_revisado.json`, `previa_firebird.json`, `relatorio_divergencias.pdf`, `relatorio_ignorados.csv`, `auditoria_importacao.json` e `resultado_gravacao.json`. SHA-256 protege a planilha e cada revisão; alteração invalida a prévia.
 
 Os backups ficam em `backups/BPAMAG_ANTES_IMPORTACAO_AAAAMMDD_HHMMSS.fbk`. A aplicação nunca restaura backup automaticamente.
+
+Retenção: depois de uma gravação **totalmente verificada**, a aplicação mantém os 5 backups mais recentes e apaga os mais antigos. Se a gravação tiver qualquer falha de verificação, nenhum backup é apagado. Só são considerados arquivos com o nome exato acima; cópias manuais ou com outro nome na pasta nunca são apagadas. Para mudar a quantidade, inclua `"backups_manter": N` (1 a 50) em `data/config.json`. O painel inicial mostra quantos backups estão guardados e o espaço ocupado.
 
 ## Segurança e LGPD
 
